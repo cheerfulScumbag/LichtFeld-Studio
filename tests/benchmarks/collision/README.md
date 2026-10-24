@@ -1,21 +1,46 @@
-# Voxelization timing
+# Collision timing
 
-Build the optional generation benchmark:
+Build the native benchmarks and offscreen Vulkan tests:
 
 ```sh
-cmake --build build --target bench_collision_generation
-build/tests/bench_collision_generation snapshot.f32 0.05 auto
+cmake --build build-collision --target bench_collision_generation bench_collision_queries lichtfeld_collision_overlay_tests
 ```
 
-A frozen snapshot consists of native `CollisionGaussian` rows: center XYZ, three
-column-major one-sigma axis vectors, and opacity (13 float32 values per row).
-Modes are `none`, `cleanup`, `connected`, and `auto`; optional seed XYZ follows.
-The benchmark excludes source parsing, source extraction, and output writing.
-`LFS_COLLISION_BENCHMARK_TREE=/tmp/tree.u32` saves the canonical tree outside the
-reported interval for exact before/after comparison; this is a native test dump,
-not a project or interchange format.
+Generate from a frozen native snapshot (`CollisionGaussian` records: center,
+three axis vectors, opacity; 13 float32 values per record):
 
-For complete I/O timing, measure the actual `LichtFeld-Studio voxelize` command.
-Use identical sources/settings and alternating trials with other GPU work idle.
-Report generation time separately from total wall time and peak RSS. Output
-counts alone do not establish occupancy equality.
+```sh
+LFS_COLLISION_BENCHMARK_VOLUME=/tmp/volume.json \
+build-collision/tests/bench_collision_generation snapshot.f32 0.05 auto
+```
+
+Optional modes: `none`, `cleanup`, `connected`, `strict`, `auto`. An optional XYZ
+seed follows the mode. Parsing and volume serialization are excluded from the
+reported generation interval. Keep source, settings, GPU/CPU and driver identical
+when comparing revisions; Auto or filtering changes can change the result.
+
+Measure the same saved occupancy without loading Gaussian or mesh payloads:
+
+```sh
+LFS_COLLISION_BENCHMARK_VOLUME=/tmp/volume.json \
+build-collision/tests/lichtfeld_collision_overlay_tests --gtest_filter='*ProductionVolumeBenchmark'
+build-collision/tests/bench_collision_queries /tmp/volume.json
+```
+
+Rendering uses identity coordinates, 1920×1080, ten warmups and thirty GPU samples.
+Default camera: eye `(-5,3,-5)`, target origin, vertical FOV 60°.
+`LFS_COLLISION_BENCHMARK_VIEW=walk` uses `(0,1,-3)`; `closeup` uses `(-1,1,-1)`.
+`LFS_COLLISION_BENCHMARK_IMAGE=/tmp/frame.f32` saves the CHW float output.
+
+Report `first_frame_ms` separately: it includes packing/upload, pipeline work and
+readback. `gpu_median_ms`/`gpu_p90_ms` measure the overlay pass only, excluding
+splat rendering and CPU readback. `median_ms` includes readback. None is complete
+application FPS. Use alternating trials and idle other GPU workloads.
+
+Queries use 1,000 deterministic near-origin capsules, three warmups and thirty
+batches. These boolean intersection tests are not equivalent to SuperSplat's
+penetration resolver. See the feature guide for measured results and limits.
+
+For exact canonical-tree comparisons, set `LFS_COLLISION_BENCHMARK_TREE=/tmp/tree.u32`.
+This writes raw uint32 tree words outside the generation interval. The JSON timing
+record includes the origin, dimensions and root size needed to interpret them.

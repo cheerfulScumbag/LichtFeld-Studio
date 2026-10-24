@@ -153,6 +153,15 @@ set_tests_properties(lichtfeld.file_dialog_paths PROPERTIES LABELS "fast;cpu;io"
 # CPU-only visualizer tests (no LibTorch)
 # =============================================================================
 if(BUILD_VISUALIZER_TESTS)
+    add_executable(lichtfeld_collision_overlay_tests test_collision_overlay.cpp)
+    target_compile_features(lichtfeld_collision_overlay_tests PRIVATE cxx_std_23)
+    target_include_directories(lichtfeld_collision_overlay_tests PRIVATE
+        $<TARGET_PROPERTY:lfs_visualizer,INCLUDE_DIRECTORIES>)
+    target_link_libraries(lichtfeld_collision_overlay_tests PRIVATE
+        lfs_visualizer lfs_core GTest::gtest_main SDL3::SDL3)
+    add_test(NAME lichtfeld.collision_overlay COMMAND lichtfeld_collision_overlay_tests)
+    set_tests_properties(lichtfeld.collision_overlay PROPERTIES LABELS "gpu;collision;rendering" TIMEOUT 120
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     # The focused menu-bar suite exercises no GPU code. Windows CI installs
     # the CUDA toolkit but has no display driver, so defer loading nvcuda.dll
     # until a driver API is actually called. Normal application builds retain
