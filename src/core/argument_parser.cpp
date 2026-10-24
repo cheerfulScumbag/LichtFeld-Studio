@@ -715,6 +715,7 @@ namespace {
                 "convert -- Convert between .ply, .sog, .ssog, .spz, .usd/.usda/.usdc, .html\n"
                 "compare -- Score test images against reference images\n"
                 "eval -- Score a finished model or splat file against its images\n"
+                "voxelize -- Generate SuperSplat voxel collision from a splat file\n"
                 "mesh2splat -- Convert a mesh file to Gaussian splats\n"
                 "preprocess -- Generate depth and/or normal maps for an image dataset\n"
                 "plugin -- Manage plugins (create, check, list)\n"
@@ -2064,7 +2065,7 @@ lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
     auto args = convert_args(argc, argv);
 
     if (args.size() >= 2 && !args[1].starts_with('-') &&
-        args[1] != "convert" && args[1] != "mesh2splat" &&
+        args[1] != "voxelize" && args[1] != "convert" && args[1] != "mesh2splat" &&
         args[1] != "mesh-to-splat" && args[1] != "preprocess" &&
         args[1] != "compare" && args[1] != "plugin") {
         const std::filesystem::path p = lfs::core::utf8_to_path(args[1]);
@@ -2245,6 +2246,93 @@ namespace {
         "  If conversion is not possible, it prints the command to run by hand.\n"
         "  --inference-backend accepts native (default; auto is an alias).\n"
         "\n";
+
+    std::expected<lfs::core::args::ParsedArgs, std::string> parseVoxelizeArgs(const int argc, const char* const argv[]) {
+        namespace core = lfs::core;
+        ::args::ArgumentParser parser("LichtFeld Studio - Generate SuperSplat voxel collision",
+                                      "\nExamples:\n  LichtFeld-Studio voxelize scene.ply -o scene.voxel.json\n"
+                                      "  LichtFeld-Studio voxelize scene.sog scene.voxel.json --auto\n"
+                                      "  LichtFeld-Studio voxelize scene.spz -o scene.voxel.json --filter connected --seed-pos 0,1,0\n\n"
+                                      "Writes a .voxel.json / .voxel.bin pair. Distances use input scene units; areas use squared scene units.\n"
+                                      "Uses the existing splat loaders. Datasets, point clouds, meshes and .licht projects are not voxel inputs.\n");
+        parser.Prog(std::string(argv[0]) + " voxelize");
+        ::args::HelpFlag help(parser, "help", "Display help menu", {'h', "help"});
+        ::args::Positional<std::string> input(parser, "input", "Input splat file or SOG/SSOG directory");
+        ::args::Positional<std::string> output(parser, "output", "Output .voxel.json path");
+        ::args::ValueFlag<std::string> output_flag(parser, "path", "Output .voxel.json path", {'o', "output"});
+        ::args::ValueFlag<float> size(parser, "size", "Voxel edge in scene units (default: 0.05)", {"voxel-size"});
+        ::args::ValueFlag<float> opacity(parser, "opacity", "Accumulated voxel opacity threshold [0,1] (default: 0.1)", {"voxel-opacity"});
+        ::args::Flag automatic(parser, "auto", "Estimate cell size from Gaussian footprint and source count", {"auto"});
+        ::args::ValueFlag<std::string> filter(parser, "mode", "Source filter: cleanup (default), connected, none", {"filter"});
+        ::args::ValueFlag<float> area(parser, "area", "Maximum three-sigma Gaussian area; 0 selects automatic outlier detection", {"max-gaussian-area"});
+        ::args::ValueFlag<float> spacing(parser, "size", "Connected source-cell spacing in scene units (default: 1)", {"cluster-resolution"});
+        ::args::ValueFlag<std::string> seed(parser, "x,y,z", "Connected-region seed in input coordinates (default: 0,0,0)", {"seed-pos"});
+        ::args::Flag overwrite(parser, "overwrite", "Overwrite both output files without prompting", {'y', "overwrite"});
+        LogLevelFlag log_level(parser);
+        try {
+            parser.ParseArgs(std::vector<std::string>(argv + 2, argv + argc));
+        } catch (const ::args::Help&) {
+            std::print("{}", parser.Help());
+            return core::args::HelpMode{};
+        } catch (const ::args::ParseError& e) {
+            return std::unexpected(std::format("{}\n\n{}", e.what(), parser.Help()));
+        }
+        if (!input || (!output && !output_flag))
+            return std::unexpected(std::format("Input and output paths are required\n\n{}", parser.Help()));
+        if (output && output_flag)
+            return std::unexpected("Specify output either positionally or with --output");
+        if (automatic && size)
+            return std::unexpected("--auto and --voxel-size are mutually exclusive");
+        core::args::VoxelizeMode mode;
+        mode.input_path = absolute_input_path(::args::get(input));
+        mode.output_path = absolute_input_path(output_flag ? ::args::get(output_flag) : ::args::get(output));
+        if (!core::native_fs::exists(mode.input_path))
+            return std::unexpected("Input not found: " + core::path_to_utf8(mode.input_path));
+        if (lfs::io::project::isPublishedLichtPath(mode.input_path))
+            return std::unexpected("voxelize accepts splat files, not .licht projects; export the splats first");
+        if (!core::path_to_utf8(mode.output_path.filename()).ends_with(".voxel.json"))
+            return std::unexpected("Output must end in .voxel.json");
+        auto& s = mode.settings;
+        s.auto_resolution = automatic;
+        if (size)
+            s.voxel_size = ::args::get(size);
+        if (opacity)
+            s.opacity = ::args::get(opacity);
+        if (area)
+            s.max_gaussian_area = ::args::get(area);
+        if (spacing)
+            s.cluster_resolution = ::args::get(spacing);
+        const std::string selected = filter ? ::args::get(filter) : "cleanup";
+        if (selected != "cleanup" && selected != "connected" && selected != "none")
+            return std::unexpected("--filter must be cleanup, connected or none");
+        s.adaptive_filter = selected != "none";
+        s.cluster = selected == "connected";
+        if ((seed || spacing) && !s.cluster)
+            return std::unexpected("--seed-pos and --cluster-resolution require --filter connected");
+        if (area && !s.adaptive_filter)
+            return std::unexpected("--max-gaussian-area requires cleanup or connected filtering");
+        if (seed) {
+            std::string_view rest = ::args::get(seed);
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto comma = rest.find(',');
+                const auto part = rest.substr(0, comma);
+                const auto [end, error] = std::from_chars(part.data(), part.data() + part.size(), s.seed[axis]);
+                if (part.empty() || error != std::errc{} || end != part.data() + part.size() ||
+                    (axis < 2 ? comma == std::string_view::npos : comma != std::string_view::npos))
+                    return std::unexpected("--seed-pos requires three finite numbers: x,y,z");
+                if (axis < 2)
+                    rest.remove_prefix(comma + 1);
+            }
+        }
+        try {
+            s.validate();
+        } catch (const std::exception& e) { return std::unexpected(e.what()); }
+        std::string error;
+        if (!log_level.apply(error))
+            return std::unexpected(error);
+        mode.overwrite = overwrite;
+        return mode;
+    }
 
     std::expected<lfs::core::args::ParsedArgs, std::string> parseConvertArgs(const int argc, const char* const argv[]) {
         namespace core_args = lfs::core::args;
@@ -2844,7 +2932,9 @@ lfs::core::args::parse_args(const int argc, const char* const argv[]) {
             return WarmupMode{};
         }
 
-        if (arg1 == "convert") {
+        if (arg1 == "voxelize") {
+            return parseVoxelizeArgs(argc, argv);
+        } else if (arg1 == "convert") {
             return parseConvertArgs(argc, argv);
         } else if (arg1 == "eval") {
             std::string error;

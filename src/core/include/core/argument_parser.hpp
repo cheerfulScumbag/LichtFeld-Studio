@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/collision.hpp"
 #include "core/export.hpp"
 
 #include "core/parameters.hpp"
@@ -46,6 +47,11 @@ namespace lfs::core::args {
     struct ConvertMode {
         param::ConvertParameters params;
     };
+    struct VoxelizeMode {
+        std::filesystem::path input_path, output_path;
+        CollisionSettings settings;
+        bool overwrite = false;
+    };
     struct Mesh2SplatMode {
         param::Mesh2SplatParameters params;
     };
@@ -70,7 +76,7 @@ namespace lfs::core::args {
         std::optional<std::filesystem::path> dataset_path;
     };
 
-    using ParsedArgs = std::variant<TrainingMode, ConvertMode, Mesh2SplatMode, PreprocessMode, CompareMode, HelpMode,
+    using ParsedArgs = std::variant<TrainingMode, ConvertMode, VoxelizeMode, Mesh2SplatMode, PreprocessMode, CompareMode, HelpMode,
                                     VersionMode, WarmupMode, PluginMode, LichtMode>;
 
     LFS_CORE_API std::expected<ParsedArgs, std::string> parse_args(int argc, const char* const argv[]);
