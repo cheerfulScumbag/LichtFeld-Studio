@@ -2247,8 +2247,16 @@ namespace {
         "  --inference-backend accepts native (default; auto is an alias).\n"
         "\n";
 
-    std::expected<lfs::core::args::ParsedArgs, std::string> parseVoxelizeArgs(const int argc, const char* const argv[]) {
+    lfs::Result<lfs::core::args::ParsedArgs> parseVoxelizeArgs(const int argc, const char* const argv[]) {
         namespace core = lfs::core;
+        const auto invalid = [](std::string message) {
+            return lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::InvalidArgument,
+                .domain = lfs::ErrorDomain::Core,
+                .user_message = std::move(message),
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            });
+        };
         ::args::ArgumentParser parser("LichtFeld Studio - Generate SuperSplat voxel collision",
                                       "\nExamples:\n  LichtFeld-Studio voxelize scene.ply -o scene.voxel.json\n"
                                       "  LichtFeld-Studio voxelize scene.sog scene.voxel.json --auto\n"
@@ -2275,23 +2283,23 @@ namespace {
             std::print("{}", parser.Help());
             return core::args::HelpMode{};
         } catch (const ::args::ParseError& e) {
-            return std::unexpected(std::format("{}\n\n{}", e.what(), parser.Help()));
+            return invalid(std::format("{}\n\n{}", e.what(), parser.Help()));
         }
         if (!input || (!output && !output_flag))
-            return std::unexpected(std::format("Input and output paths are required\n\n{}", parser.Help()));
+            return invalid(std::format("Input and output paths are required\n\n{}", parser.Help()));
         if (output && output_flag)
-            return std::unexpected("Specify output either positionally or with --output");
+            return invalid("Specify output either positionally or with --output");
         if (automatic && size)
-            return std::unexpected("--auto and --voxel-size are mutually exclusive");
+            return invalid("--auto and --voxel-size are mutually exclusive");
         core::args::VoxelizeMode mode;
         mode.input_path = absolute_input_path(::args::get(input));
         mode.output_path = absolute_input_path(output_flag ? ::args::get(output_flag) : ::args::get(output));
         if (!core::native_fs::exists(mode.input_path))
-            return std::unexpected("Input not found: " + core::path_to_utf8(mode.input_path));
+            return invalid("Input not found: " + core::path_to_utf8(mode.input_path));
         if (lfs::io::project::isPublishedLichtPath(mode.input_path))
-            return std::unexpected("voxelize accepts splat files, not .licht projects; export the splats first");
+            return invalid("voxelize accepts splat files, not .licht projects; export the splats first");
         if (!core::path_to_utf8(mode.output_path.filename()).ends_with(".voxel.json"))
-            return std::unexpected("Output must end in .voxel.json");
+            return invalid("Output must end in .voxel.json");
         auto& s = mode.settings;
         s.auto_resolution = automatic;
         if (size)
@@ -2304,13 +2312,13 @@ namespace {
             s.cluster_resolution = ::args::get(spacing);
         const std::string selected = filter ? ::args::get(filter) : "cleanup";
         if (selected != "cleanup" && selected != "connected" && selected != "none")
-            return std::unexpected("--filter must be cleanup, connected or none");
+            return invalid("--filter must be cleanup, connected or none");
         s.adaptive_filter = selected != "none";
         s.cluster = selected == "connected";
         if ((seed || spacing) && !s.cluster)
-            return std::unexpected("--seed-pos and --cluster-resolution require --filter connected");
+            return invalid("--seed-pos and --cluster-resolution require --filter connected");
         if (area && !s.adaptive_filter)
-            return std::unexpected("--max-gaussian-area requires cleanup or connected filtering");
+            return invalid("--max-gaussian-area requires cleanup or connected filtering");
         if (seed) {
             std::string_view rest = ::args::get(seed);
             for (int axis = 0; axis < 3; ++axis) {
@@ -2319,17 +2327,20 @@ namespace {
                 const auto [end, error] = std::from_chars(part.data(), part.data() + part.size(), s.seed[axis]);
                 if (part.empty() || error != std::errc{} || end != part.data() + part.size() ||
                     (axis < 2 ? comma == std::string_view::npos : comma != std::string_view::npos))
-                    return std::unexpected("--seed-pos requires three finite numbers: x,y,z");
+                    return invalid("--seed-pos requires three finite numbers: x,y,z");
                 if (axis < 2)
                     rest.remove_prefix(comma + 1);
             }
         }
         try {
             s.validate();
-        } catch (const std::exception& e) { return std::unexpected(e.what()); }
+        } catch (const std::exception& e) {
+            // LFS-CENSUS-OK(empty-catch): convert validation failures to a typed argument error.
+            return invalid(e.what());
+        }
         std::string error;
         if (!log_level.apply(error))
-            return std::unexpected(error);
+            return invalid(error);
         mode.overwrite = overwrite;
         return mode;
     }
@@ -2933,7 +2944,10 @@ lfs::core::args::parse_args(const int argc, const char* const argv[]) {
         }
 
         if (arg1 == "voxelize") {
-            return parseVoxelizeArgs(argc, argv);
+            auto parsed = parseVoxelizeArgs(argc, argv);
+            if (!parsed)
+                return std::unexpected(std::string(parsed.error().user_message()));
+            return std::move(*parsed);
         } else if (arg1 == "convert") {
             return parseConvertArgs(argc, argv);
         } else if (arg1 == "eval") {

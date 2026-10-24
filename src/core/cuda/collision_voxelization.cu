@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include "collision_voxelization.hpp"
 #include "core/cuda/morton.cuh"
+#include "core/cuda_allocation.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cuda_runtime.h>
@@ -21,8 +22,10 @@ namespace lfs::core::cuda {
             cudaStream_t value{};
             Stream() { checked(cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking)); }
             ~Stream() {
-                cudaStreamSynchronize(value);
-                cudaStreamDestroy(value);
+                ensure_cuda_success(cudaStreamSynchronize(value), "collision stream synchronization", {},
+                                    LFS_SOURCE_SITE_CURRENT(), CudaFailureDisposition::LogOnlyNoLatch);
+                ensure_cuda_success(cudaStreamDestroy(value), "collision stream destruction", {},
+                                    LFS_SOURCE_SITE_CURRENT(), CudaFailureDisposition::LogOnlyNoLatch);
             }
         };
         template <class T>
@@ -31,7 +34,7 @@ namespace lfs::core::cuda {
             size_t capacity = 0;
             ~Buffer() {
                 if (data)
-                    cudaFree(data);
+                    DirectCudaAllocator{}.deallocate(data, nullptr);
             }
             void reserve(size_t n) {
                 if (n <= capacity)
