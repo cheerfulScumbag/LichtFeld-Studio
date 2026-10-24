@@ -55,7 +55,7 @@ if(TARGET lfs_core)
 
     add_executable(lichtfeld_collision_gpu_tests test_collision_gpu.cpp)
     target_compile_features(lichtfeld_collision_gpu_tests PRIVATE cxx_std_23)
-    target_link_libraries(lichtfeld_collision_gpu_tests PRIVATE lfs_core GTest::gtest_main CUDA::cudart)
+    target_link_libraries(lichtfeld_collision_gpu_tests PRIVATE lfs_core GTest::gtest_main CUDA::cudart CUDA::cuda_driver)
     add_test(NAME lichtfeld.collision_gpu COMMAND lichtfeld_collision_gpu_tests)
     set_tests_properties(lichtfeld.collision_gpu PROPERTIES LABELS "gpu;collision" TIMEOUT 120 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
