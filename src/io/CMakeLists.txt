@@ -242,6 +242,7 @@ endif()
 add_library(lfs_io STATIC
         # Implementation file only (header is in include/io/)
         loader.cpp
+        collision_export.cpp
         splat_decimate.cpp
 
         # Internal implementation files
