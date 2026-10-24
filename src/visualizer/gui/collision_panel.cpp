@@ -515,6 +515,7 @@ namespace lfs::vis::gui {
                 std::lock_guard lock(mutex_);
                 result_ = Result{std::move(volume), std::move(mesh), grid_to_world, sources, target, scene_generation, graph_epoch, display};
             } catch (const std::exception& error) {
+                // LFS-CENSUS-OK(empty-catch): adoption logs and displays this worker error on the GUI thread.
                 std::lock_guard lock(mutex_);
                 error_ = error.what();
             }
@@ -617,6 +618,7 @@ namespace lfs::vis::gui {
             if (scrubEvent(event))
                 return;
         } catch (const std::exception& error) {
+            LOG_ERROR("Collision controls: {}", error.what());
             showError(error.what());
             return;
         }

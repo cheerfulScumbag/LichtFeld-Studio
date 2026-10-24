@@ -2754,6 +2754,7 @@ namespace lfs::io::project {
                         result.collision_display.surface_shape = result.collision->settings.shape;
                     }
                 } catch (const std::exception& error) {
+                    // LFS-CENSUS-OK(empty-catch): return a typed chapter error for the invalid payload.
                     return fail<SceneNodeRecord>(
                         lfs::ErrorCode::DataLoss, "Invalid collision node payload.",
                         error.what(), "SCNG", "nodes.collision");
@@ -2970,6 +2971,7 @@ namespace lfs::io::project {
                 element["collision"] = nlohmann::json(*value.collision);
                 element["collision_display"] = nlohmann::json(value.collision_display);
             } catch (const std::exception& error) {
+                // LFS-CENSUS-OK(empty-catch): return a typed chapter error for the invalid payload.
                 return fail<void>(lfs::ErrorCode::InvalidArgument,
                                   "Invalid collision node payload.", error.what(), "SCNG", "nodes.collision");
             }
