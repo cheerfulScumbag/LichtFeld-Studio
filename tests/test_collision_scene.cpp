@@ -77,6 +77,20 @@ namespace {
     };
 } // namespace
 
+TEST_F(CollisionWalkController, CameraSeedsUseDataWorldForBothNavigationAxes) {
+    Viewport viewport;
+    viewport.camera.t = {2, 3, 5};
+    lfs::vis::InputController input(nullptr, viewport);
+    input.initialize();
+    const auto seed = lfs::rendering::dataWorldPointFromVisualizerWorld(input.cameraPosition());
+    EXPECT_EQ(seed, glm::vec3(2, -3, -5));
+    for (auto axis : {lfs::vis::NavigationUpAxis::LegacyY, lfs::vis::NavigationUpAxis::DataZ}) {
+        const auto grid_to_data = lfs::rendering::VISUALIZER_TO_DATA_WORLD_AXES_4 * glm::mat4(lfs::vis::navigationFrame(axis));
+        const auto grid_seed = glm::vec3(glm::inverse(grid_to_data) * glm::vec4(seed, 1));
+        EXPECT_EQ(grid_seed, axis == lfs::vis::NavigationUpAxis::LegacyY ? glm::vec3(2, 3, 5) : glm::vec3(2, -5, 3));
+    }
+}
+
 class CollisionArchive : public testing::TestWithParam<bool> {};
 TEST_P(CollisionArchive, RestoresGeometryAndVolumeWithDeferredHydration) {
     Scene scene;

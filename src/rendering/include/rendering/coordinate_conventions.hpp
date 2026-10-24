@@ -72,6 +72,10 @@ namespace lfs::rendering {
         return DATA_TO_VISUALIZER_WORLD_AXES * data_point;
     }
 
+    inline glm::vec3 dataWorldPointFromVisualizerWorld(const glm::vec3& visualizer_point) {
+        return glm::vec3(VISUALIZER_TO_DATA_WORLD_AXES_4 * glm::vec4(visualizer_point, 1.0f));
+    }
+
     inline glm::mat4 dataWorldTransformToVisualizerWorld(const glm::mat4& data_world_transform) {
         return DATA_TO_VISUALIZER_WORLD_AXES_4 * data_world_transform;
     }

@@ -84,7 +84,10 @@ namespace lfs::vis::gui {
         return result;
     }
     bool CollisionPanel::checked(const char* id) const {
-        return document_->GetElementById(id)->HasAttribute("checked");
+        auto* control = document_->GetElementById(id);
+        if (!control)
+            throw std::runtime_error(std::string("Missing collision control: ") + id);
+        return control->HasAttribute("checked");
     }
     void CollisionPanel::setValue(const char* id, std::string v) {
         if (auto* control = dynamic_cast<Rml::ElementFormControl*>(document_->GetElementById(id)))
@@ -373,7 +376,7 @@ namespace lfs::vis::gui {
             if (auto* title = document_->GetElementById("title-text"))
                 title->SetInnerRML(Rml::StringUtilities::EncodeRml(LOC("collision.title")));
             if (auto* input = InputController::instance(); target_.is_nil() && input)
-                world_seed_ = lfs::rendering::visualizerWorldPointFromDataWorld(input->cameraPosition());
+                world_seed_ = lfs::rendering::dataWorldPointFromVisualizerWorld(input->cameraPosition());
             writeInputs();
         }
         adoptResult();
@@ -660,7 +663,7 @@ namespace lfs::vis::gui {
                 resetSurfaceSettings();
             } else if (id == "camera-seed") {
                 if (auto* input = InputController::instance()) {
-                    auto p = lfs::rendering::visualizerWorldPointFromDataWorld(input->cameraPosition());
+                    auto p = lfs::rendering::dataWorldPointFromVisualizerWorld(input->cameraPosition());
                     setValue("seed-x", std::format("{:.6g}", p.x));
                     setValue("seed-y", std::format("{:.6g}", p.y));
                     setValue("seed-z", std::format("{:.6g}", p.z));
