@@ -155,6 +155,9 @@ namespace lfs::io {
 
             // JSON files might be datasets (transforms.json)
             if (ext == ".json") {
+                // Unpacked SOG metadata is a supported single-splat entry point.
+                if (path.filename() == "meta.json")
+                    return false;
                 LOG_TRACE("JSON file detected, treating as potential dataset: {}", lfs::core::path_to_utf8(path));
                 return true;
             }

@@ -7,6 +7,9 @@
 #include "core/splat_data.hpp"
 #include "core/uuid.hpp"
 #include "io/exporter.hpp"
+#include "io/loader.hpp"
+#include <archive.h>
+#include <archive_entry.h>
 #include <cmath>
 #include <cuda_runtime.h>
 #include <fstream>
@@ -171,10 +174,32 @@ namespace {
         std::ifstream(mode.output_path) >> meta;
         EXPECT_GT(meta["nodeCount"].get<size_t>(), 0);
         ASSERT_TRUE(lfs::io::save_sog(model, {.output_path = dir / "input.sog", .kmeans_iterations = 1, .use_gpu = false}));
+        const auto unpacked = dir / "unpacked";
+        std::filesystem::create_directory(unpacked);
+        std::ifstream sog(dir / "input.sog", std::ios::binary);
+        const std::vector<char> bytes{std::istreambuf_iterator<char>(sog), std::istreambuf_iterator<char>()};
+        std::unique_ptr<archive, decltype(&archive_read_free)> reader(archive_read_new(), archive_read_free);
+        ASSERT_EQ(archive_read_support_format_zip(reader.get()), ARCHIVE_OK);
+        ASSERT_EQ(archive_read_open_memory(reader.get(), bytes.data(), bytes.size()), ARCHIVE_OK);
+        archive_entry* entry = nullptr;
+        int result;
+        while ((result = archive_read_next_header(reader.get(), &entry)) == ARCHIVE_OK) {
+            const auto path = unpacked / utf8_to_path(archive_entry_pathname(entry));
+            ASSERT_EQ(path.parent_path(), unpacked);
+            std::vector<char> data(archive_entry_size(entry));
+            ASSERT_EQ(archive_read_data(reader.get(), data.data(), data.size()), data.size());
+            std::ofstream out(path, std::ios::binary);
+            out.write(data.data(), data.size());
+            ASSERT_TRUE(out);
+        }
+        ASSERT_EQ(result, ARCHIVE_EOF);
+        EXPECT_FALSE(lfs::io::Loader::isDatasetPath(unpacked / "meta.json"));
+        std::ofstream(dir / "transforms.json") << "{}";
+        EXPECT_TRUE(lfs::io::Loader::isDatasetPath(dir / "transforms.json"));
         ASSERT_TRUE(lfs::io::save_ssog(model, {.output_path = dir / "input.ssog", .lod_levels = 2, .kmeans_iterations = 1, .use_gpu = false}));
         ASSERT_TRUE(lfs::io::save_rad(model, {.output_path = dir / "input.rad"}));
         ASSERT_TRUE(lfs::io::save_usd(model, {.output_path = dir / "input.usda"}));
-        for (const auto* name : {"input.sog", "input.ssog", "input.rad", "input.usda"}) {
+        for (const auto* name : {"input.sog", "unpacked", "unpacked/meta.json", "input.ssog", "input.rad", "input.usda"}) {
             SCOPED_TRACE(name);
             mode.input_path = dir / name;
             testing::internal::CaptureStdout();

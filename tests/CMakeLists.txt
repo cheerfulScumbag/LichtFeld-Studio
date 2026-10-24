@@ -53,7 +53,7 @@ if(TARGET lfs_core)
         ../src/app/voxelizer.cpp ../src/app/converter_overwrite.cpp)
     target_compile_features(lichtfeld_voxelize_cli_tests PRIVATE cxx_std_23)
     target_include_directories(lichtfeld_voxelize_cli_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/app/include ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/external)
-    target_link_libraries(lichtfeld_voxelize_cli_tests PRIVATE lfs_io lfs_core GTest::gtest_main)
+    target_link_libraries(lichtfeld_voxelize_cli_tests PRIVATE lfs_io lfs_core GTest::gtest_main LibArchive::LibArchive)
     add_test(NAME lichtfeld.voxelize_cli COMMAND lichtfeld_voxelize_cli_tests)
     set_tests_properties(lichtfeld.voxelize_cli PROPERTIES LABELS "cli;collision;io" TIMEOUT 120)
 
