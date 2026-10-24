@@ -137,7 +137,10 @@ namespace lfs::vis::gui {
                         if (target_ != target || !current || current->collision != payload || (!payload && current->mesh != geometry))
                             throw std::runtime_error("Collision changed while confirming export. Select the intended node and export again.");
                         startExport(voxels, path);
-                    } catch (const std::exception& e) { showError(e.what()); }
+                    } catch (const std::exception& e) {
+                        // LFS-CENSUS-OK(empty-catch): showError logs and displays this diagnostic.
+                        showError(e.what());
+                    }
             };
             services().guiOrNull()->enqueueModal(std::move(request));
         } else
@@ -188,6 +191,7 @@ namespace lfs::vis::gui {
                     io::exportCollisionGlb(surface.vertices, surface.indices, transform, path, stop, core::collisionProgressRange(report, .6f, 1));
                 }
             } catch (const std::exception& e) {
+                // LFS-CENSUS-OK(empty-catch): prepare logs and displays this worker error on the GUI thread.
                 std::lock_guard lock(mutex_);
                 error_ = e.what();
             }
@@ -206,7 +210,10 @@ namespace lfs::vis::gui {
                 chooseExport(el->GetId() == "export-voxels");
             else if (el->GetId() == "export-cancel")
                 worker_.request_stop();
-        } catch (const std::exception& e) { showError(e.what()); }
+        } catch (const std::exception& e) {
+            // LFS-CENSUS-OK(empty-catch): showError logs and displays this diagnostic.
+            showError(e.what());
+        }
     }
     void CollisionExportPanel::draw(const PanelDrawContext& ctx) {
         if (prepare(ctx))

@@ -685,6 +685,7 @@ namespace lfs::vis::gui {
                 std::lock_guard lock(mutex_);
                 result_ = Result{volume, mesh, transform, {}, target, generation, epoch, display, true};
             } catch (const std::exception& error) {
+                // LFS-CENSUS-OK(empty-catch): adoption logs and displays this worker error on the GUI thread.
                 std::lock_guard lock(mutex_);
                 error_ = error.what();
             }
