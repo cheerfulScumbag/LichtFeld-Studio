@@ -1,20 +1,14 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include "core/collision.hpp"
-#include "core/collision_serialization.hpp"
 #include "core/mesh_data.hpp"
 #include "rendering/mesh_offscreen_renderer.hpp"
 #include "rendering/passes/vulkan_mesh_pass.hpp"
 #include "window/vulkan_context.hpp"
 #include <SDL3/SDL.h>
 #include <array>
-#include <chrono>
-#include <cstdlib>
-#include <fstream>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
-#include <iostream>
-#include <nlohmann/json.hpp>
 #include <random>
 
 namespace {
@@ -77,58 +71,6 @@ namespace {
             return {pixels[center], pixels[4096 + center], pixels[8192 + center]};
         }
     };
-
-    // Opt-in production-volume benchmark; regular regressions remain tiny.
-    TEST_F(CollisionOverlay, ProductionVolumeBenchmark) {
-        const char* path = std::getenv("LFS_COLLISION_BENCHMARK_VOLUME");
-        if (!path)
-            GTEST_SKIP() << "Set LFS_COLLISION_BENCHMARK_VOLUME to a native volume JSON";
-        renderer.setGpuTimingEnabled(true);
-        std::ifstream input(path);
-        ASSERT_TRUE(input);
-        nlohmann::json saved;
-        input >> saved;
-        volume = saved.get<lfs::core::CollisionVolume>();
-        auto bounds = volume.boundsMesh();
-        geometry->vertices = lfs::core::Tensor::from_vector(bounds.vertices, {bounds.vertices.size() / 3, 3}, lfs::core::Device::CPU);
-        geometry->indices = lfs::core::Tensor::from_vector(bounds.indices, {bounds.indices.size() / 3, 3}, lfs::core::Device::CPU);
-        auto draw = item();
-        const auto projection = glm::perspective(glm::radians(60.0f), 1920.f / 1080, .01f, 1000.f);
-        lfs::vis::VulkanMeshPassParams params;
-        params.camera_position = {-5, 3, -5};
-        if (const char* view = std::getenv("LFS_COLLISION_BENCHMARK_VIEW")) {
-            if (std::string_view(view) == "walk")
-                params.camera_position = {0, 1, -3};
-            else if (std::string_view(view) == "closeup")
-                params.camera_position = {-1, 1, -1};
-        }
-        params.view_projection = projection * glm::lookAt(params.camera_position, glm::vec3(0), glm::vec3(0, 1, 0));
-        params.items = {draw};
-        // Includes initial packing, upload, pipeline work and CPU readback.
-        const auto cold_start = std::chrono::steady_clock::now();
-        ASSERT_TRUE(renderer.render(*context, params, projection, 1920, 1080));
-        const auto first_frame_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cold_start).count();
-        for (int i = 1; i < 10; ++i)
-            ASSERT_TRUE(renderer.render(*context, params, projection, 1920, 1080));
-        ASSERT_GT(renderer.lastGpuMilliseconds(), 0) << "GPU timestamps are unavailable";
-        std::vector<double> times, gpu_times;
-        for (int i = 0; i < 30; ++i) {
-            const auto start = std::chrono::steady_clock::now();
-            ASSERT_TRUE(renderer.render(*context, params, projection, 1920, 1080));
-            times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-            gpu_times.push_back(renderer.lastGpuMilliseconds());
-        }
-        if (const char* output = std::getenv("LFS_COLLISION_BENCHMARK_IMAGE")) {
-            auto frame = renderer.render(*context, params, projection, 1920, 1080);
-            ASSERT_TRUE(frame);
-            std::ofstream file(output, std::ios::binary);
-            const auto rgba = frame->rgba.to_vector();
-            file.write(reinterpret_cast<const char*>(rgba.data()), rgba.size() * sizeof(float));
-        }
-        std::sort(times.begin(), times.end());
-        std::sort(gpu_times.begin(), gpu_times.end());
-        std::cout << "COLLISION_BENCHMARK project=" << path << " eye=" << params.camera_position.x << "," << params.camera_position.y << "," << params.camera_position.z << " resolution=1920x1080 first_frame_ms=" << first_frame_ms << " median_ms=" << times[times.size() / 2] << " p90_ms=" << times[27] << " gpu_median_ms=" << gpu_times[gpu_times.size() / 2] << " gpu_p90_ms=" << gpu_times[27] << std::endl;
-    }
 
     TEST_F(CollisionOverlay, CornerCrossingsMatchIndependentRayBoxCoverage) {
         volume.settings.voxel_size = .05f;

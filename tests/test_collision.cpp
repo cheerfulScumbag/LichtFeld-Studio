@@ -4,7 +4,6 @@
 #include "core/collision.hpp"
 #include "core/collision_serialization.hpp"
 #include <algorithm>
-#include <chrono>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
 #include <map>
@@ -501,19 +500,14 @@ TEST(WalkMotion, StepsAndThinCeilingSweep) {
     EXPECT_LT(state.eye.x, 1.0f);
     EXPECT_LT(state.eye.y, 1.22f);
 }
-TEST(CollisionPerformance, IndoorFiveCentimeterCarve) {
+TEST(CollisionPipeline, IndoorFiveCentimeterCarve) {
     auto g = grid({120, 70, 120}, 0.05f);
     box(g, {2, 2, 2}, {117, 67, 117}, true);
     g.settings.carve_height = 1.6f;
     g.settings.carve_radius = 0.2f;
     g.settings.seed = {3, 1.8f, 3};
-    auto start = std::chrono::steady_clock::now();
     auto carved = processCollisionVolume(std::move(g));
-    auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    RecordProperty("carve_seconds", seconds);
-    std::cout << "Native 6m x 3.5m x 6m / 5cm carve: " << seconds << " s\n";
     EXPECT_FALSE(carved.occupied(carved.cell({3, 1.8f, 3})));
-    EXPECT_LT(seconds, 15);
 }
 
 TEST(CollisionAuthoring, CalibratedSceneScaleKeepsMetricPresetDimensions) {

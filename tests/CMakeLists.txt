@@ -45,10 +45,6 @@ add_test(NAME lichtfeld.collision COMMAND lichtfeld_collision_tests)
 set_tests_properties(lichtfeld.collision PROPERTIES LABELS "cpu;collision;navigation" TIMEOUT 60)
 
 if(TARGET lfs_core)
-    add_executable(bench_collision_generation EXCLUDE_FROM_ALL bench_collision_generation.cpp)
-    target_compile_features(bench_collision_generation PRIVATE cxx_std_23)
-    target_link_libraries(bench_collision_generation PRIVATE lfs_core nlohmann_json::nlohmann_json)
-
     add_executable(lichtfeld_voxelize_cli_tests test_voxelize_cli.cpp test_collision_export.cpp
         ../src/app/voxelizer.cpp ../src/app/converter_overwrite.cpp)
     target_compile_features(lichtfeld_voxelize_cli_tests PRIVATE cxx_std_23)
@@ -62,9 +58,6 @@ if(TARGET lfs_core)
     target_link_libraries(lichtfeld_collision_gpu_tests PRIVATE lfs_core GTest::gtest_main CUDA::cudart)
     add_test(NAME lichtfeld.collision_gpu COMMAND lichtfeld_collision_gpu_tests)
     set_tests_properties(lichtfeld.collision_gpu PROPERTIES LABELS "gpu;collision" TIMEOUT 120 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-    add_executable(bench_collision_queries EXCLUDE_FROM_ALL bench_collision_queries.cpp)
-    target_compile_features(bench_collision_queries PRIVATE cxx_std_23)
-    target_link_libraries(bench_collision_queries PRIVATE lfs_core nlohmann_json::nlohmann_json)
 endif()
 
 # Deliberately no executable opt-in: exercise extended-path I/O independently

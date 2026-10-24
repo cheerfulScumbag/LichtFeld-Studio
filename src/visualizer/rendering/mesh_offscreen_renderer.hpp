@@ -61,10 +61,6 @@ namespace lfs::vis {
             int width,
             int height);
 
-        // Opt-in before the first render; normal exports allocate no timing queries.
-        void setGpuTimingEnabled(bool enabled);
-        // GPU draw interval only; excludes uploads, image readback and CPU conversion.
-        [[nodiscard]] double lastGpuMilliseconds() const;
         void shutdown();
 
     private:
