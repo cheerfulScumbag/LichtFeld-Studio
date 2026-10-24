@@ -138,15 +138,15 @@ namespace {
                 GTEST_SKIP() << "CUDA device unavailable";
         }
     };
-    TEST_F(VoxelizeGpuCli, LoadsPlyAndSpzAndWritesBothCompanionsWithoutChangingTheSource) {
-        auto means = Tensor::zeros({16, 3}, Device::CPU);
-        auto sh0 = Tensor::zeros({16, 1, 3}, Device::CPU);
-        auto scales = Tensor::full({16, 3}, std::log(.04f), Device::CPU);
-        auto rotations = Tensor::zeros({16, 4}, Device::CPU);
-        auto opacity = Tensor::full({16, 1}, 2.f, Device::CPU);
-        for (int i = 0; i < 16; ++i) {
-            means.ptr<float>()[i * 3] = (i % 4) * .1f;
-            means.ptr<float>()[i * 3 + 2] = (i / 4) * .1f;
+    TEST_F(VoxelizeGpuCli, LoadsSupportedSplatFormatsAndWritesBothCompanionsWithoutChangingTheSource) {
+        auto means = Tensor::zeros({256, 3}, Device::CPU);
+        auto sh0 = Tensor::zeros({256, 1, 3}, Device::CPU);
+        auto scales = Tensor::full({256, 3}, std::log(.04f), Device::CPU);
+        auto rotations = Tensor::zeros({256, 4}, Device::CPU);
+        auto opacity = Tensor::full({256, 1}, 2.f, Device::CPU);
+        for (int i = 0; i < 256; ++i) {
+            means.ptr<float>()[i * 3] = (i % 16) * .1f;
+            means.ptr<float>()[i * 3 + 2] = (i / 16) * .1f;
             rotations.ptr<float>()[i * 4] = 1;
         }
         SplatData model(0, means, sh0, Tensor{}, scales, rotations, opacity, 1);
@@ -170,6 +170,21 @@ namespace {
         ASSERT_EQ(lfs::app::run_voxelizer(mode), 0);
         std::ifstream(mode.output_path) >> meta;
         EXPECT_GT(meta["nodeCount"].get<size_t>(), 0);
+        ASSERT_TRUE(lfs::io::save_sog(model, {.output_path = dir / "input.sog", .kmeans_iterations = 1, .use_gpu = false}));
+        ASSERT_TRUE(lfs::io::save_ssog(model, {.output_path = dir / "input.ssog", .lod_levels = 2, .kmeans_iterations = 1, .use_gpu = false}));
+        ASSERT_TRUE(lfs::io::save_rad(model, {.output_path = dir / "input.rad"}));
+        ASSERT_TRUE(lfs::io::save_usd(model, {.output_path = dir / "input.usda"}));
+        for (const auto* name : {"input.sog", "input.ssog", "input.rad", "input.usda"}) {
+            SCOPED_TRACE(name);
+            mode.input_path = dir / name;
+            testing::internal::CaptureStdout();
+            const int status = lfs::app::run_voxelizer(mode);
+            const auto output = testing::internal::GetCapturedStdout();
+            ASSERT_EQ(status, 0) << output;
+            EXPECT_NE(output.find("from 256 Gaussians"), std::string::npos) << output;
+            std::ifstream(mode.output_path) >> meta;
+            EXPECT_GT(meta["nodeCount"].get<size_t>(), 0);
+        }
         auto binary = mode.output_path;
         binary.replace_extension(".bin");
         EXPECT_EQ(std::filesystem::file_size(binary), 4 * (meta["nodeCount"].get<size_t>() + meta["leafDataCount"].get<size_t>()));
