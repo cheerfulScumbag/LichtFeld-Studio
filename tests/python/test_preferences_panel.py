@@ -308,6 +308,8 @@ def preferences_panel_module(monkeypatch):
             ),
             DEPTH_ADJUST_FAR=SimpleNamespace(name="DEPTH_ADJUST_FAR", value=36),
             APPLY_CROP_BOX=SimpleNamespace(name="APPLY_CROP_BOX", value=37),
+            INSERT_CROP_POLYGON_VERTEX=SimpleNamespace(name="INSERT_CROP_POLYGON_VERTEX", value=96),
+            REMOVE_CROP_POLYGON_VERTEX=SimpleNamespace(name="REMOVE_CROP_POLYGON_VERTEX", value=97),
             NODE_PICK=SimpleNamespace(name="NODE_PICK", value=38),
             NODE_RECT_SELECT=SimpleNamespace(name="NODE_RECT_SELECT", value=39),
             UNDO=SimpleNamespace(name="UNDO", value=40),
