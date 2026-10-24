@@ -621,6 +621,40 @@ TEST(CollisionAuthoring, CoarseSurfaceRetainsAllSupportsWithoutChangingWalkData)
     EXPECT_THROW((void)g.coarsened(4, cancelled.get_token()), std::runtime_error);
 }
 
+TEST(CollisionAuthoring, SparseCoarseningIgnoresPaddingAndMatchesDenseSupport) {
+    std::mt19937 rng(3793);
+    for (auto dimensions : {glm::ivec3(1, 3, 3), glm::ivec3(9, 6, 13), glm::ivec3(17, 13, 19)}) {
+        auto dense = grid(dimensions);
+        collision_detail::Tree tree(dimensions);
+        // Deliberately occupy every padding cell, independently of scene support.
+        tree.setBox({0, 0, 0}, glm::ivec3(tree.size));
+        for (int round = 0; round < 2; ++round) {
+            for (int z = 0; z < dimensions.z; ++z)
+                for (int y = 0; y < dimensions.y; ++y)
+                    for (int x = 0; x < dimensions.x; ++x) {
+                        const glm::ivec3 p(x, y, z);
+                        const bool occupied = round && rng() % 5 == 0;
+                        dense.solid[dense.index(p)] = occupied;
+                        tree.setBox(p, p + 1, occupied);
+                    }
+            auto padded = dense;
+            padded.solid.clear();
+            tree.compact();
+            padded.tree = tree.nodes;
+            padded.tree_size = tree.size;
+            padded.validate();
+            const auto before = padded.tree;
+            for (int stride : {1, 2, 4, 16}) {
+                SCOPED_TRACE(::testing::Message() << dimensions.x << ',' << dimensions.y << ',' << dimensions.z << " stride=" << stride << " round=" << round);
+                const auto coarse = padded.coarsened(stride);
+                coarse.validate();
+                sameOccupancy(dense.coarsened(stride), coarse);
+            }
+            EXPECT_EQ(padded.tree, before);
+        }
+    }
+}
+
 TEST(CollisionAuthoring, CalibratedSceneScaleKeepsMetricPresetDimensions) {
     CollisionSettings settings;
     settings.units_per_meter = 10;

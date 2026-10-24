@@ -1394,27 +1394,32 @@ namespace lfs::core {
         if (tree.empty()) {
             forEachSolidBox([&](auto lo, auto hi) { reduced.setBox(lo / stride, (hi + stride - 1) / stride); });
         } else {
-            auto anySolid = [&](auto&& self, uint32_t i) -> bool {
+            auto anySolid = [&](auto&& self, uint32_t i, glm::ivec3 min, int edge) -> bool {
+                checkpoint(stop);
+                if (glm::any(glm::greaterThanEqual(min, dimensions)))
+                    return false;
                 if (tree[i] <= 1)
                     return tree[i] != 0;
                 for (int c = 0; c < 8; ++c)
-                    if (self(self, tree[i] - 2 + c))
+                    if (self(self, tree[i] - 2 + c, min + glm::ivec3(c & 1, (c >> 1) & 1, c >> 2) * (edge / 2), edge / 2))
                         return true;
                 return false;
             };
-            auto visit = [&](auto&& self, uint32_t src, uint32_t dst, int edge) -> void {
+            auto visit = [&](auto&& self, uint32_t src, uint32_t dst, glm::ivec3 min, int edge) -> void {
                 checkpoint(stop);
+                if (glm::any(glm::greaterThanEqual(min, dimensions)))
+                    return;
                 if (tree[src] <= 1 || edge <= stride) {
-                    reduced.nodes[dst] = anySolid(anySolid, src);
+                    reduced.nodes[dst] = anySolid(anySolid, src, min, edge);
                     return;
                 }
                 auto base = uint32_t(reduced.nodes.size());
                 reduced.nodes.resize(reduced.nodes.size() + 8);
                 reduced.nodes[dst] = base + 2;
                 for (int c = 0; c < 8; ++c)
-                    self(self, tree[src] - 2 + c, base + c, edge / 2);
+                    self(self, tree[src] - 2 + c, base + c, min + glm::ivec3(c & 1, (c >> 1) & 1, c >> 2) * (edge / 2), edge / 2);
             };
-            visit(visit, 0, 0, tree_size);
+            visit(visit, 0, 0, glm::ivec3(0), tree_size);
         }
         collision_detail::storeTree(out, std::move(reduced));
         return out;
