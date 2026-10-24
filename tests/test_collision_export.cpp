@@ -16,7 +16,7 @@ namespace {
     struct CollisionExport : testing::Test {
         std::filesystem::path dir = std::filesystem::temp_directory_path() / ("lfs-collision-export-" + core::generate_uuid_v4().to_string());
         void SetUp() override { std::filesystem::create_directories(dir); }
-        void TearDown() override { core::native_fs::remove_all(dir); }
+        void TearDown() override { std::filesystem::remove_all(dir); }
         core::CollisionVolume volume(glm::ivec3 dimensions = {13, 7, 9}) {
             core::CollisionVolume v;
             v.origin = {-1.25f, 2.5f, -.75f};
@@ -125,17 +125,6 @@ TEST_F(CollisionExport, TinySolidAndEmptyVolumesAreValid) {
     v.tree = {0};
     roundtrip(v, glm::mat4(1));
 }
-TEST_F(CollisionExport, ValidLongFilenamesUseSharedTemporaryPathHandling) {
-    const auto path = dir / (std::string(240, 's') + ".voxel.json");
-    auto binary = path;
-    binary.replace_extension(".bin");
-    const auto v = volume({4, 4, 4});
-    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
-    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
-    EXPECT_TRUE(core::native_fs::is_regular_file(path));
-    EXPECT_TRUE(core::native_fs::is_regular_file(binary));
-    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
-}
 TEST_F(CollisionExport, NonrepresentableVoxelTransformsFailWithoutWriting) {
     auto v = volume();
     EXPECT_THROW(io::exportCollisionVoxels(v, glm::rotate(glm::mat4(1), .2f, glm::vec3(0, 1, 0)), dir / "scene.voxel.json"), std::runtime_error);
@@ -159,7 +148,7 @@ TEST_F(CollisionExport, CancellationKeepsPriorFilesAndCleansTemporaryPayloads) {
     EXPECT_EQ(content, "old json");
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
 }
-TEST_F(CollisionExport, ProgressIsMonotonic) {
+TEST_F(CollisionExport, VoxelProgressIsMonotonic) {
     const auto v = volume();
     float previous = 0;
     auto report = [&](float value, const auto& stage) {
@@ -180,5 +169,17 @@ TEST_F(CollisionExport, OverwritePublishesBothFilesAndInvalidDestinationKeepsThe
     std::filesystem::create_directory(dir / "scene.voxel.json");
     EXPECT_THROW(io::exportCollisionVoxels(v, glm::mat4(1), dir / "scene.voxel.json"), std::runtime_error);
     EXPECT_EQ(std::filesystem::file_size(dir / "scene.voxel.bin"), bytes);
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
+}
+
+TEST_F(CollisionExport, ValidLongFilenamesUseSharedTemporaryPathHandling) {
+    const auto path = dir / (std::string(240, 's') + ".voxel.json");
+    auto binary = path;
+    binary.replace_extension(".bin");
+    const auto v = volume({4, 4, 4});
+    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+    EXPECT_TRUE(core::native_fs::is_regular_file(path));
+    EXPECT_TRUE(core::native_fs::is_regular_file(binary));
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
 }

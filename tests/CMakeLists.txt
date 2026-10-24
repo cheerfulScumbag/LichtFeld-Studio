@@ -61,7 +61,10 @@ if(TARGET lfs_core)
     target_compile_features(lichtfeld_collision_gpu_tests PRIVATE cxx_std_23)
     target_link_libraries(lichtfeld_collision_gpu_tests PRIVATE lfs_core GTest::gtest_main CUDA::cudart)
     add_test(NAME lichtfeld.collision_gpu COMMAND lichtfeld_collision_gpu_tests)
-    set_tests_properties(lichtfeld.collision_gpu PROPERTIES LABELS "gpu;collision" TIMEOUT 120)
+    set_tests_properties(lichtfeld.collision_gpu PROPERTIES LABELS "gpu;collision" TIMEOUT 120 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_executable(bench_collision_queries EXCLUDE_FROM_ALL bench_collision_queries.cpp)
+    target_compile_features(bench_collision_queries PRIVATE cxx_std_23)
+    target_link_libraries(bench_collision_queries PRIVATE lfs_core nlohmann_json::nlohmann_json)
 endif()
 
 # Deliberately no executable opt-in: exercise extended-path I/O independently

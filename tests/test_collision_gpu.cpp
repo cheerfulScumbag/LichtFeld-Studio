@@ -137,14 +137,20 @@ namespace {
         EXPECT_FALSE(gpu.occupied(gpu.cell({20000, 0, 20000})));
         EXPECT_LT(gpu.tree.size(), 10000u);
     }
-    TEST_F(CollisionGpu, ConnectedFilterUsesGpuWithoutChangingSemantics) {
+    TEST_F(CollisionGpu, ClusterAndPostprocessUseGpuWithoutChangingSemantics) {
         CollisionSettings s;
         s.cluster = true;
         s.cluster_resolution = .2f;
+        s.cluster_opacity = .1f;
         s.voxel_size = .1f;
         s.seed = {0, 0, 0};
+        s.floor_fill = true;
+        s.floor_size = 0;
         const std::array source{CollisionGaussian{{1, 0, 0}, glm::mat3(.2f), 1}, CollisionGaussian{{5, 0, 0}, glm::mat3(.2f), 1}};
-        same(generateCollision(source, s), generateCollision(source, s, {}, {}, voxelizeCollisionGpu));
+        for (bool adaptive : {true, false}) {
+            s.adaptive_filter = adaptive;
+            same(generateCollision(source, s), generateCollision(source, s, {}, {}, voxelizeCollisionGpu));
+        }
     }
     TEST_F(CollisionGpu, CancellationAndEmptyOpacityAreExplicit) {
         CollisionSettings s;
@@ -167,5 +173,14 @@ namespace {
                      std::runtime_error);
         EXPECT_TRUE(stop.stop_requested());
         EXPECT_GT(voxelizeCollisionGpu(std::span(&g, 1), s).occupiedCount(), 0u);
+    }
+    TEST_F(CollisionGpu, ConnectedFilterUsesGpuWithoutChangingSemantics) {
+        CollisionSettings s;
+        s.cluster = true;
+        s.cluster_resolution = .2f;
+        s.voxel_size = .1f;
+        s.seed = {0, 0, 0};
+        const std::array source{CollisionGaussian{{1, 0, 0}, glm::mat3(.2f), 1}, CollisionGaussian{{5, 0, 0}, glm::mat3(.2f), 1}};
+        same(generateCollision(source, s), generateCollision(source, s, {}, {}, voxelizeCollisionGpu));
     }
 } // namespace
