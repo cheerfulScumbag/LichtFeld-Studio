@@ -5,7 +5,7 @@
 #include <filesystem>
 
 namespace lfs::io {
-    // Both writers use PlayCanvas coordinates: Rz(pi) * the node's data-world
+    // Voxel output uses PlayCanvas coordinates: Rz(pi) * the data-world
     // transform, matching a world-transformed PLY imported by SuperSplat.
     // Voxel export preserves occupancy exactly; rotated/sheared/nonuniform grids
     // that cannot be represented by the format fail rather than misalign/resample.

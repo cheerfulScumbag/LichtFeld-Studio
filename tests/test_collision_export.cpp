@@ -1,5 +1,6 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
+#include "core/native_fs.hpp"
 #include "core/uuid.hpp"
 #include "io/collision_export.hpp"
 #include <algorithm>
@@ -15,7 +16,7 @@ namespace {
     struct CollisionExport : testing::Test {
         std::filesystem::path dir = std::filesystem::temp_directory_path() / ("lfs-collision-export-" + core::generate_uuid_v4().to_string());
         void SetUp() override { std::filesystem::create_directories(dir); }
-        void TearDown() override { std::filesystem::remove_all(dir); }
+        void TearDown() override { core::native_fs::remove_all(dir); }
         core::CollisionVolume volume(glm::ivec3 dimensions = {13, 7, 9}) {
             core::CollisionVolume v;
             v.origin = {-1.25f, 2.5f, -.75f};
@@ -123,6 +124,17 @@ TEST_F(CollisionExport, TinySolidAndEmptyVolumesAreValid) {
     roundtrip(v, glm::mat4(1));
     v.tree = {0};
     roundtrip(v, glm::mat4(1));
+}
+TEST_F(CollisionExport, ValidLongFilenamesUseSharedTemporaryPathHandling) {
+    const auto path = dir / (std::string(240, 's') + ".voxel.json");
+    auto binary = path;
+    binary.replace_extension(".bin");
+    const auto v = volume({4, 4, 4});
+    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+    EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+    EXPECT_TRUE(core::native_fs::is_regular_file(path));
+    EXPECT_TRUE(core::native_fs::is_regular_file(binary));
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
 }
 TEST_F(CollisionExport, NonrepresentableVoxelTransformsFailWithoutWriting) {
     auto v = volume();

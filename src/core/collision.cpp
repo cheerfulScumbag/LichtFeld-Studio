@@ -394,7 +394,7 @@ namespace lfs::core {
                 gaussians = filtered;
             }
             if (gaussians.empty())
-                throw std::runtime_error("Source cleanup excluded all splats; increase maximum splat area or choose Keep all splats");
+                throw std::runtime_error("Source cleanup excluded all splats; increase maximum Gaussian area or disable source cleanup");
         }
         if (s.auto_resolution) {
             s.voxel_size = collision_detail::recommendCollisionVoxelSize(gaussians, s.units_per_meter, stop);

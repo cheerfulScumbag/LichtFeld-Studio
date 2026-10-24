@@ -19,7 +19,7 @@ namespace lfs::core {
         // Scale-invariant reconstruction cleanup; seeded clustering uses source
         // connectivity rather than a scene-dependent opacity threshold.
         bool adaptive_filter = true;
-        bool auto_resolution = false; // UI defaults to Auto; explicit API resolutions remain exact.
+        bool auto_resolution = false; // Explicit resolutions remain exact.
         float max_gaussian_area = 0;  // Three-sigma footprint, scene units squared; zero selects a relative outlier fence.
         float cluster_resolution = 1.0f;
         float voxel_size = 0.05f;
@@ -34,7 +34,7 @@ namespace lfs::core {
 
     // axes maps a unit sphere to the Gaussian's rotated/scaled one-sigma ellipsoid.
     struct CollisionGaussian {
-        // Bound source snapshots independently of sparse occupancy/output budgets.
+        // Bound source input independently of sparse occupancy/output budgets.
         static constexpr size_t max_count = 32'000'000;
         glm::vec3 center;
         glm::mat3 axes;
@@ -76,7 +76,7 @@ namespace lfs::core {
         static constexpr size_t max_cells = 16'000'000;
         static constexpr size_t max_tree_words = 512'000'001;
         static_assert(max_tree_words + 2 < (uint32_t(1) << 31),
-                      "GPU occupancy reserves the high bit for brick pointers");
+                      "Sparse child pointers must fit within 31 bits");
         CollisionSettings settings;
         glm::vec3 origin{0};
         glm::ivec3 dimensions{0};

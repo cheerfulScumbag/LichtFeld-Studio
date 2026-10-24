@@ -73,7 +73,7 @@ namespace lfs::app {
                 report(.15f, "Extracting original Gaussians from LOD data");
                 auto leaves = extract_lod_leaves(**model);
                 if (!leaves)
-                    throw std::runtime_error(leaves.error().detail());
+                    throw std::runtime_error(std::string(leaves.error().detail()));
                 *model = std::make_shared<SplatData>(std::move(*leaves));
             }
             if ((*model)->size() > CollisionGaussian::max_count)

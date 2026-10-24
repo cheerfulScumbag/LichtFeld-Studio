@@ -3,7 +3,7 @@
 #include "io/collision_export.hpp"
 #include "core/native_fs.hpp"
 #include "core/path_utils.hpp"
-#include "core/uuid.hpp"
+#include "io/atomic_output_path.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -57,7 +57,7 @@ namespace lfs::io {
         // a partially written payload. The metadata is published last.
         struct Temporary {
             std::filesystem::path path;
-            explicit Temporary(const std::filesystem::path& target) : path(target) { path += "." + core::generate_uuid_v4().to_string() + ".tmp"; }
+            explicit Temporary(const std::filesystem::path& target) : path(make_atomic_temp_output_path(target)) {}
             ~Temporary() {
                 std::error_code ec;
                 core::native_fs::remove(path, ec);
