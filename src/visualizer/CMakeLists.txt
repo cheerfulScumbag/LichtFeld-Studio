@@ -113,6 +113,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/selection_cursor.cpp
         gui/html_viewer_export.cpp
         gui/scene_panel_native.cpp
+        gui/collision_panel.cpp
         gui/ui_widgets.cpp
         gui_capabilities.cpp
         gui/panels/windows_console_utils.cpp
