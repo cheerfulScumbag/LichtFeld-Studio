@@ -40,9 +40,9 @@ add_executable(lichtfeld_collision_tests test_collision.cpp ../src/core/collisio
 target_compile_features(lichtfeld_collision_tests PRIVATE cxx_std_23)
 target_compile_definitions(lichtfeld_collision_tests PRIVATE LFS_STATIC_BUILD)
 target_include_directories(lichtfeld_collision_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/core/include)
-target_link_libraries(lichtfeld_collision_tests PRIVATE GTest::gtest_main glm::glm TBB::tbb)
+target_link_libraries(lichtfeld_collision_tests PRIVATE GTest::gtest_main glm::glm nlohmann_json::nlohmann_json TBB::tbb)
 add_test(NAME lichtfeld.collision COMMAND lichtfeld_collision_tests)
-set_tests_properties(lichtfeld.collision PROPERTIES LABELS "cpu;collision" TIMEOUT 60)
+set_tests_properties(lichtfeld.collision PROPERTIES LABELS "cpu;collision;navigation" TIMEOUT 60)
 
 if(TARGET lfs_core)
     add_executable(bench_collision_generation EXCLUDE_FROM_ALL bench_collision_generation.cpp)

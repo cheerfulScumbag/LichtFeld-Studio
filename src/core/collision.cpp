@@ -12,9 +12,12 @@
 #include <numbers>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace lfs::core {
     namespace {
+        constexpr glm::ivec3 directions[] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        constexpr uint64_t max_work = 500'000'000;
         struct GridPointHash {
             size_t operator()(const std::array<int32_t, 3>& p) const noexcept {
                 size_t h = std::hash<int32_t>{}(p[0]);
@@ -50,16 +53,199 @@ namespace lfs::core {
             }
             return n;
         }
+        template <typename Fn>
+        void eachCell(const CollisionVolume& g, std::stop_token stop, Fn fn) {
+            for (int z = 0; z < g.dimensions.z; ++z) {
+                checkpoint(stop);
+                for (int y = 0; y < g.dimensions.y; ++y)
+                    for (int x = 0; x < g.dimensions.x; ++x)
+                        fn(glm::ivec3(x, y, z));
+            }
+        }
+        std::vector<uint8_t> flood(const CollisionVolume& g, const std::vector<uint8_t>& blocked,
+                                   std::span<const glm::ivec3> seeds, std::stop_token stop) {
+            std::vector<uint8_t> visited(g.solid.size(), 0);
+            std::vector<uint32_t> queue;
+            for (auto p : seeds) {
+                if (!g.contains(p))
+                    continue;
+                auto i = g.index(p);
+                if (!blocked[i] && !visited[i]) {
+                    visited[i] = 1;
+                    queue.push_back(static_cast<uint32_t>(i));
+                }
+            }
+            for (size_t head = 0; head < queue.size(); ++head) {
+                if ((head & 4095) == 0)
+                    checkpoint(stop);
+                const auto i = queue[head];
+                glm::ivec3 p;
+                p.x = i % g.dimensions.x;
+                p.y = (i / g.dimensions.x) % g.dimensions.y;
+                p.z = i / (g.dimensions.x * g.dimensions.y);
+                for (auto dir : directions) {
+                    auto q = p + dir;
+                    if (!g.contains(q))
+                        continue;
+                    auto j = g.index(q);
+                    if (!visited[j] && !blocked[j]) {
+                        visited[j] = 1;
+                        queue.push_back(static_cast<uint32_t>(j));
+                    }
+                }
+            }
+            return visited;
+        }
+        std::vector<uint8_t> dilate(const CollisionVolume& g, int radius, std::stop_token stop) {
+            auto data = g.solid;
+            std::vector<uint8_t> next(data.size());
+            // Separable sliding windows: independent of the world-space sealing radius.
+            for (int axis = 0; axis < 3; ++axis) {
+                int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                for (int a = 0; a < g.dimensions[u]; ++a) {
+                    checkpoint(stop);
+                    for (int b = 0; b < g.dimensions[v]; ++b) {
+                        glm::ivec3 p(0);
+                        p[u] = a;
+                        p[v] = b;
+                        int sum = 0;
+                        for (int c = 0; c <= std::min(radius, g.dimensions[axis] - 1); ++c) {
+                            p[axis] = c;
+                            sum += data[g.index(p)] != 0;
+                        }
+                        for (int c = 0; c < g.dimensions[axis]; ++c) {
+                            p[axis] = c;
+                            next[g.index(p)] = sum > 0;
+                            if (c - radius >= 0) {
+                                p[axis] = c - radius;
+                                sum -= data[g.index(p)] != 0;
+                            }
+                            if (c + radius + 1 < g.dimensions[axis]) {
+                                p[axis] = c + radius + 1;
+                                sum += data[g.index(p)] != 0;
+                            }
+                        }
+                    }
+                }
+                data.swap(next);
+            }
+            return data;
+        }
+        std::vector<uint8_t> capsuleDilate(const CollisionVolume& g,
+                                           const std::vector<uint8_t>& source,
+                                           float height, float radius, std::stop_token stop) {
+            const double segment_cells = std::ceil((double(height) / 2 - radius) / g.settings.voxel_size);
+            if (segment_cells > g.dimensions.y * 2)
+                throw std::runtime_error("Carve capsule is taller than collision bounds");
+            const int segment = int(segment_cells);
+            std::vector<float> distance(source.size(), 1e20f);
+            for (int z = 0; z < g.dimensions.z; ++z) {
+                checkpoint(stop);
+                for (int x = 0; x < g.dimensions.x; ++x) {
+                    int count = 0;
+                    for (int y = 0; y <= std::min(segment, g.dimensions.y - 1); ++y)
+                        count += source[g.index({x, y, z})] != 0;
+                    for (int y = 0; y < g.dimensions.y; ++y) {
+                        distance[g.index({x, y, z})] = count ? 0 : 1e20f;
+                        if (y - segment >= 0)
+                            count -= source[g.index({x, y - segment, z})] != 0;
+                        if (y + segment + 1 < g.dimensions.y)
+                            count += source[g.index({x, y + segment + 1, z})] != 0;
+                    }
+                }
+            }
+            // Squared Euclidean distance transform: lower envelopes of 1D
+            // parabolas, composed along three axes. O(cells), not O(cells*capsule).
+            const int longest = std::max({g.dimensions.x, g.dimensions.y, g.dimensions.z});
+            std::vector<float> input(longest), output(longest);
+            std::vector<int> sites(longest);
+            std::vector<double> cuts(size_t(longest) + 1);
+            for (int axis = 0; axis < 3; ++axis) {
+                int u = (axis + 1) % 3, v = (axis + 2) % 3, n = g.dimensions[axis];
+                for (int a = 0; a < g.dimensions[u]; ++a) {
+                    checkpoint(stop);
+                    for (int b = 0; b < g.dimensions[v]; ++b) {
+                        glm::ivec3 p(0);
+                        p[u] = a;
+                        p[v] = b;
+                        for (int q = 0; q < n; ++q) {
+                            p[axis] = q;
+                            input[q] = distance[g.index(p)];
+                        }
+                        int k = -1;
+                        for (int q = 0; q < n; ++q) {
+                            if (input[q] >= 1e19f)
+                                continue;
+                            double intersection = -std::numeric_limits<double>::infinity();
+                            while (k >= 0) {
+                                int previous = sites[k];
+                                intersection = (double(input[q]) + double(q) * q -
+                                                double(input[previous]) - double(previous) * previous) /
+                                               (2.0 * (q - previous));
+                                if (intersection > cuts[k])
+                                    break;
+                                --k;
+                            }
+                            ++k;
+                            sites[k] = q;
+                            cuts[k] = k == 0 ? -std::numeric_limits<double>::infinity() : intersection;
+                            cuts[k + 1] = std::numeric_limits<double>::infinity();
+                        }
+                        if (k < 0)
+                            continue;
+                        int envelope = 0;
+                        for (int q = 0; q < n; ++q) {
+                            while (cuts[envelope + 1] < q)
+                                ++envelope;
+                            double delta = q - sites[envelope];
+                            output[q] = float(delta * delta + input[sites[envelope]]);
+                        }
+                        for (int q = 0; q < n; ++q) {
+                            p[axis] = q;
+                            distance[g.index(p)] = output[q];
+                        }
+                    }
+                }
+            }
+            float threshold = radius / g.settings.voxel_size + std::sqrt(3.0f) / 2;
+            threshold *= threshold;
+            std::vector<uint8_t> result(distance.size());
+            for (size_t i = 0; i < result.size(); ++i)
+                result[i] = distance[i] < threshold;
+            return result;
+        }
     } // namespace
 
+    void CollisionSettings::applyPreset(CollisionPreset value) {
+        preset = value;
+        external_fill = value == CollisionPreset::Indoor;
+        // Surface collision is the safe default. Ground-volume extrusion is an
+        // explicit authoring option, since vegetation is not a ground estimator.
+        floor_fill = false;
+        carve_height = value == CollisionPreset::Indoor ? 1.6f * units_per_meter : 0;
+        carve_radius = 0.2f * units_per_meter;
+        external_size = floor_size = 1.6f * units_per_meter;
+        cluster_resolution = units_per_meter;
+    }
     void CollisionSettings::validate() const {
         positive(voxel_size, "Voxel size");
         positive(units_per_meter, "Scene units per metre");
         positive(cluster_resolution, "Cluster resolution");
         positive(max_gaussian_area, "Maximum Gaussian area", true);
         probability(opacity, "Voxel opacity");
+        probability(cluster_opacity, "Cluster opacity");
+        positive(cluster_min_contribution, "Minimum cluster contribution", true);
+        positive(external_size, "External fill size", true);
+        positive(floor_size, "Floor fill size", true);
+        positive(carve_height, "Carve height", true);
+        positive(carve_radius, "Carve radius");
+        if (carve_height > 0 && carve_height < 2 * carve_radius)
+            throw std::invalid_argument("Carve height must be at least twice its radius");
         if (!finite(seed))
             throw std::invalid_argument("Seed must be finite");
+        if (preset < CollisionPreset::Indoor || preset > CollisionPreset::Object ||
+            shape < CollisionShape::Smooth || shape > CollisionShape::Faces)
+            throw std::invalid_argument("Invalid collision preset or mesh shape");
     }
     size_t CollisionVolume::index(glm::ivec3 p) const {
         return (size_t(p.z) * dimensions.y + p.y) * dimensions.x + p.x;
@@ -120,6 +306,90 @@ namespace lfs::core {
         if (std::any_of(solid.begin(), solid.end(), [](auto v) { return v > 1; }))
             throw std::invalid_argument("Invalid collision occupancy value");
     }
+    bool CollisionVolume::capsuleIntersects(glm::vec3 feet, glm::vec3 up, float height, float radius) const {
+        const glm::vec3 a = feet + up * radius, b = feet + up * (height - radius);
+        const auto delta = b - a;
+        const auto segment_lo = glm::min(a, b), segment_hi = glm::max(a, b);
+        const bool axis_aligned = (delta.x == 0 && delta.z == 0) ||
+                                  (delta.x == 0 && delta.y == 0) ||
+                                  (delta.y == 0 && delta.z == 0);
+        // Segment/AABB distance is piecewise quadratic. Evaluate its exact
+        // minimum on intervals split at the six box-plane crossings, instead
+        // of twenty ternary-search iterations for every occupied voxel.
+        auto intersectsBox = [&](glm::vec3 lo, glm::vec3 hi) {
+            const auto separation = glm::max(glm::max(lo - segment_hi, segment_lo - hi), glm::vec3(0));
+            if (glm::dot(separation, separation) >= radius * radius)
+                return false;
+            // For a segment parallel to any box axis this lower bound is the
+            // exact distance. The normal Walk capsule needs no plane sorting.
+            if (axis_aligned)
+                return true;
+            std::array<float, 8> times{0, 1};
+            int count = 2;
+            for (int axis = 0; axis < 3; ++axis) {
+                if (std::abs(delta[axis]) < 1e-12f)
+                    continue;
+                for (float plane : {lo[axis], hi[axis]}) {
+                    const float t = (plane - a[axis]) / delta[axis];
+                    if (t > 0 && t < 1)
+                        times[count++] = t;
+                }
+            }
+            std::sort(times.begin(), times.begin() + count);
+            for (int i = 1; i < count; ++i) {
+                const float left = times[i - 1], right = times[i], middle = (left + right) * 0.5f;
+                const auto point = a + delta * middle;
+                float numerator = 0, denominator = 0;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (point[axis] >= lo[axis] && point[axis] <= hi[axis])
+                        continue;
+                    const float bound = point[axis] < lo[axis] ? lo[axis] : hi[axis];
+                    numerator += delta[axis] * (a[axis] - bound);
+                    denominator += delta[axis] * delta[axis];
+                }
+                const float t = denominator > 0 ? glm::clamp(-numerator / denominator, left, right) : middle;
+                const auto p = a + delta * t;
+                const auto distance = p - glm::clamp(p, lo, hi);
+                if (glm::dot(distance, distance) < radius * radius)
+                    return true;
+            }
+            return false;
+        };
+        if (!tree.empty()) {
+            size_t visited = 0;
+            auto visit = [&](auto&& self, uint32_t index, glm::ivec3 lo, int edge) -> bool {
+                if (tree[index] == 0 || glm::any(glm::greaterThanEqual(lo, dimensions)))
+                    return false;
+                if (++visited > 2'000'000)
+                    throw std::runtime_error("Capsule query exceeds resource limit");
+                if (!intersectsBox(origin + glm::vec3(lo) * settings.voxel_size,
+                                   origin + glm::vec3(glm::min(lo + edge, dimensions)) * settings.voxel_size))
+                    return false;
+                if (tree[index] == 1)
+                    return true;
+                for (int child = 0; child < 8; ++child)
+                    if (self(self, tree[index] - 2 + child,
+                             lo + glm::ivec3(child & 1, (child >> 1) & 1, child >> 2) * (edge / 2), edge / 2))
+                        return true;
+                return false;
+            };
+            return visit(visit, 0, {}, tree_size);
+        }
+        auto low = glm::max(cell(glm::min(a, b) - radius), glm::ivec3(0));
+        auto high = glm::min(cell(glm::max(a, b) + radius), dimensions - 1);
+        uint64_t visited = 0;
+        for (int z = low.z; z <= high.z; ++z)
+            for (int y = low.y; y <= high.y; ++y)
+                for (int x = low.x; x <= high.x; ++x) {
+                    if (++visited > 2'000'000)
+                        throw std::runtime_error("Capsule query exceeds resource limit");
+                    if (occupied({x, y, z}) && intersectsBox(origin + glm::vec3(x, y, z) * settings.voxel_size,
+                                                             origin + glm::vec3(x + 1, y + 1, z + 1) * settings.voxel_size))
+                        return true;
+                }
+        return false;
+    }
+
     namespace collision_detail {
         float recommendCollisionVoxelSize(std::span<const CollisionGaussian> source, float units, std::stop_token stop) {
             positive(units, "Scene units per metre");
@@ -367,6 +637,132 @@ namespace lfs::core {
             return result;
         }
 
+        ClusterSelection selectCluster(std::span<const CollisionGaussian> source, const CollisionVolume& coarse,
+                                       glm::vec3 requested_seed, float min_contribution, std::stop_token stop,
+                                       CollisionProgress progress) {
+            checkpoint(stop);
+            if (!finite(requested_seed))
+                throw std::invalid_argument("Non-finite cluster seed");
+            positive(min_contribution, "Minimum cluster contribution", true);
+            const auto size = coarse.settings.voxel_size;
+            const auto raw_cell = glm::floor((glm::dvec3(requested_seed) - glm::dvec3(coarse.origin)) / double(size));
+            const auto requested_cell = glm::clamp(raw_cell, glm::dvec3(0), glm::dvec3(coarse.dimensions - 1));
+            auto seed = glm::ivec3(requested_cell);
+            const bool snapped = raw_cell != requested_cell || !coarse.occupied(seed);
+            if (!coarse.occupied(seed)) {
+                const auto requested_cell = seed;
+                double best = std::numeric_limits<double>::max();
+                coarse.forEachSolidBox([&](auto lo, auto hi) {
+                    checkpoint(stop);
+                    const auto p = glm::clamp(requested_cell, lo, hi - 1);
+                    const auto delta = glm::dvec3(p) - glm::dvec3(requested_cell);
+                    const auto distance = glm::dot(delta, delta);
+                    if (distance < best) {
+                        best = distance;
+                        seed = p;
+                    }
+                });
+                if (best == std::numeric_limits<double>::max())
+                    throw std::runtime_error("Cluster opacity threshold produced no solid voxels");
+            }
+            // Use a compact coarse tree rather than a dense
+            // world grid. Flood visits face-connected adaptive leaves only.
+            auto tree = volumeTree(coarse, stop).flood(std::span(&seed, 1), true);
+            ClusterSelection result;
+            result.resolved_seed = snapped ? coarse.origin + (glm::vec3(seed) + 0.5f) * size : requested_seed;
+            tree.leaves([&](const Leaf& leaf) {
+                if (leaf.solid) {
+                    const auto d = glm::min(leaf.max(), tree.dimensions) - leaf.min;
+                    result.occupied_voxels += uint64_t(d.x) * d.y * d.z;
+                }
+            });
+            result.indices.reserve(source.size());
+            uint64_t work = 0;
+            for (size_t i = 0; i < source.size(); ++i) {
+                if ((i & 4095) == 0) {
+                    checkpoint(stop);
+                    if (progress)
+                        progress(float(i) / source.size(), "Selecting contributing splats");
+                }
+                const auto& g = source[i];
+                // Upstream's fast path also preserves low-opacity and sub-voxel
+                // detail whose centers lie in the selected component.
+                const auto center_cell = glm::floor((glm::dvec3(g.center) - glm::dvec3(coarse.origin)) / double(size));
+                if (glm::all(glm::greaterThanEqual(center_cell, glm::dvec3(0))) &&
+                    glm::all(glm::lessThan(center_cell, glm::dvec3(tree.dimensions))) && tree.occupied(glm::ivec3(center_cell))) {
+                    result.indices.push_back(uint32_t(i));
+                    continue;
+                }
+                if (g.opacity < min_contribution || std::abs(glm::determinant(g.axes)) < 1e-20f)
+                    continue;
+                glm::dvec3 extent;
+                for (int a = 0; a < 3; ++a)
+                    extent[a] = 3 * glm::length(glm::dvec3(g.axes[0][a], g.axes[1][a], g.axes[2][a]));
+                const double aabb_voxels = std::max({extent.x, extent.y, extent.z}) > size ? (2 * extent.x / size) * (2 * extent.y / size) * (2 * extent.z / size) : 0;
+                const double required = std::max(1.0, std::ceil(aabb_voxels * 0.1));
+                if (required > double(result.occupied_voxels))
+                    continue;
+                const auto min = glm::clamp(glm::floor((glm::dvec3(g.center) - extent - glm::dvec3(coarse.origin)) / double(size)),
+                                            glm::dvec3(0), glm::dvec3(tree.dimensions));
+                const auto max = glm::clamp(glm::floor((glm::dvec3(g.center) + extent - glm::dvec3(coarse.origin)) / double(size)) + 1.0,
+                                            glm::dvec3(0), glm::dvec3(tree.dimensions));
+                const auto lo = glm::ivec3(min), hi = glm::ivec3(max);
+                const auto inverse = glm::inverse(g.axes);
+                const auto inv = glm::dmat3(inverse);
+                uint64_t hits = 0;
+                const auto needed = uint64_t(required);
+                const auto limit = min_contribution == 0 ? std::numeric_limits<double>::infinity() : -2 * std::log(double(min_contribution) / g.opacity);
+                // Query occupied tree regions directly. Empty world volume is
+                // never scanned; uniform qualifying regions count in one step.
+                auto visit = [&](auto&& self, uint32_t index, glm::ivec3 origin, int n) -> void {
+                    if (hits >= needed || tree.nodes[index] == 0)
+                        return;
+                    if ((++work & 4095) == 0)
+                        checkpoint(stop);
+                    if (work > max_work)
+                        throw std::runtime_error("Cluster query work budget exceeded");
+                    const auto a = glm::max(lo, origin), b = glm::min(hi, origin + n);
+                    if (glm::any(glm::greaterThanEqual(a, b)))
+                        return;
+                    const auto middle = glm::dvec3(coarse.origin) + (glm::dvec3(a) + glm::dvec3(b)) * (double(size) / 2);
+                    const auto half = glm::dvec3(b - a - 1) * (double(size) / 2);
+                    const auto error = (glm::abs(middle) + glm::abs(glm::dvec3(coarse.origin)) + glm::abs(glm::dvec3(g.center)) + 1.0) *
+                                       (8 * double(std::numeric_limits<float>::epsilon()));
+                    const auto q = inv * (middle - glm::dvec3(g.center));
+                    const auto h = half + error;
+                    const auto qr = glm::abs(inv[0]) * h.x + glm::abs(inv[1]) * h.y + glm::abs(inv[2]) * h.z;
+                    const auto near = glm::max(glm::abs(q) - qr, glm::dvec3(0));
+                    if (glm::dot(near, near) > limit)
+                        return;
+                    const auto value = tree.nodes[index];
+                    const auto far = glm::abs(q) + qr;
+                    if (value == 1 && glm::dot(far, far) < limit) {
+                        const auto d = b - a;
+                        hits += std::min(needed - hits, uint64_t(d.x) * d.y * d.z);
+                        return;
+                    }
+                    if (n == 1) {
+                        const auto point = coarse.origin + (glm::vec3(origin) + 0.5f) * size;
+                        const auto local = inverse * (point - g.center);
+                        if (g.opacity * std::exp(-0.5f * glm::dot(local, local)) >= min_contribution)
+                            ++hits;
+                        return;
+                    }
+                    const auto half_size = n / 2;
+                    for (int child = 0; child < 8 && hits < needed; ++child)
+                        self(self, value == 1 ? index : value - 2 + child,
+                             origin + glm::ivec3(child & 1, (child >> 1) & 1, child >> 2) * half_size, half_size);
+                };
+                visit(visit, 0, {}, tree.size);
+                if (hits >= needed)
+                    result.indices.push_back(uint32_t(i));
+            }
+            if (result.indices.empty())
+                throw std::runtime_error("Cluster seed/contribution threshold retained no Gaussians");
+            if (progress)
+                progress(1, "Contributing splats selected");
+            return result;
+        }
     } // namespace collision_detail
 
     CollisionVolume generateCollision(std::span<const CollisionGaussian> gaussians, CollisionSettings s,
@@ -383,7 +779,7 @@ namespace lfs::core {
         };
         std::vector<CollisionGaussian> filtered;
         std::string cluster_note;
-        if (s.adaptive_filter || s.cluster) {
+        if (s.adaptive_filter) {
             report(0, "Finding reconstruction outliers on CPU");
             auto selection = collision_detail::selectAdaptiveSource(gaussians, s, stop, collisionProgressRange(progress, 0, filtered_end));
             cluster_note = std::move(selection.note);
@@ -396,6 +792,29 @@ namespace lfs::core {
             if (gaussians.empty())
                 throw std::runtime_error("Source cleanup excluded all splats; increase maximum Gaussian area or disable source cleanup");
         }
+        if (s.cluster && !s.adaptive_filter) {
+            report(0, "Preparing connected-region filter");
+            auto coarse_settings = s;
+            coarse_settings.voxel_size = s.cluster_resolution;
+            coarse_settings.opacity = s.cluster_opacity;
+            auto coarse = voxelize(gaussians, coarse_settings, [&](float value, std::string text) {
+                report(value * .1f, "Connected-region filter: " + text);
+            });
+            report(.1f, "Finding the occupied region nearest the seed");
+            const auto selection = collision_detail::selectCluster(gaussians, coarse, s.seed, s.cluster_min_contribution, stop, collisionProgressRange(progress, .1f, filtered_end));
+            cluster_note = std::format("Cluster filter kept {} / {} splats.", selection.indices.size(), gaussians.size());
+            const float seed_offset = glm::distance(selection.resolved_seed, s.seed);
+            if (seed_offset > 0)
+                cluster_note += std::format(" Seed snapped {:.3g} scene units to an occupied region; move the seed if the wrong region is selected.", seed_offset);
+            if (progress)
+                progress(filtered_end, "Source filtering complete: " + cluster_note);
+            if (selection.indices.size() != gaussians.size()) {
+                filtered.reserve(selection.indices.size());
+                for (auto i : selection.indices)
+                    filtered.push_back(gaussians[i]);
+                gaussians = filtered;
+            }
+        }
         if (s.auto_resolution) {
             s.voxel_size = collision_detail::recommendCollisionVoxelSize(gaussians, s.units_per_meter, stop);
             const auto note = std::format("Auto cell size: {:.4g} scene units.", s.voxel_size);
@@ -406,20 +825,158 @@ namespace lfs::core {
                 progress(filtered_end, note);
         }
         report(filtered_end, "Preparing full-resolution collision cells");
-        auto grid = voxelize(gaussians, s, collisionProgressRange(progress, filtered_end, 1.f));
-        grid.validate();
-        const bool occupied = grid.tree.empty() ? std::find(grid.solid.begin(), grid.solid.end(), 1) != grid.solid.end()
-                                                : std::find(grid.tree.begin(), grid.tree.end(), 1u) != grid.tree.end();
-        if (!occupied)
-            throw std::runtime_error("No occupied voxels; lower opacity or voxel size");
+        auto grid = voxelize(gaussians, s, collisionProgressRange(progress, filtered_end, .85f));
+        grid = processCollisionVolume(std::move(grid), stop, collisionProgressRange(progress, .85f, 1));
         checkpoint(stop);
         if (!cluster_note.empty())
             grid.warning = cluster_note + (grid.warning.empty() ? "" : " " + grid.warning);
         return grid;
     }
+    CollisionVolume processCollisionVolume(CollisionVolume grid, std::stop_token stop, CollisionProgress progress) {
+        if (!grid.tree.empty())
+            return collision_detail::processSparse(std::move(grid), stop, std::move(progress));
+        grid.validate();
+        auto s = grid.settings;
+        const int stages = s.external_fill + s.floor_fill + (s.carve_height > 0);
+        int phase = 0;
+        auto report = [&](const char* text) { checkpoint(stop); if (progress) progress(stages ? float(phase++) / stages : 1, text); checkpoint(stop); };
+        if (std::none_of(grid.solid.begin(), grid.solid.end(), [](auto v) { return v != 0; }))
+            throw std::runtime_error("No occupied voxels; lower opacity or voxel size");
+        if (s.external_fill) {
+            report("Sealing exterior");
+            int radius = static_cast<int>(std::min(std::ceil(s.external_size / (2 * s.voxel_size)),
+                                                   float(std::max({grid.dimensions.x, grid.dimensions.y, grid.dimensions.z}))));
+            auto sealed = dilate(grid, radius, stop);
+            std::vector<glm::ivec3> boundary;
+            eachCell(grid, stop, [&](auto p) {
+                if (p.x == 0 || p.y == 0 || p.z == 0 || p.x == grid.dimensions.x - 1 ||
+                    p.y == grid.dimensions.y - 1 || p.z == grid.dimensions.z - 1)
+                    boundary.push_back(p);
+            });
+            auto exterior = flood(grid, sealed, boundary, stop);
+            auto seed = grid.cell(s.seed);
+            if (!grid.contains(seed) || exterior[grid.index(seed)] || sealed[grid.index(seed)]) {
+                grid.warning = "External fill skipped: seed is exterior or consumed by sealing dilation";
+            } else {
+                for (size_t i = 0; i < grid.solid.size(); ++i)
+                    grid.solid[i] = grid.solid[i] || exterior[i];
+            }
+        }
+        if (s.floor_fill) {
+            report("Filling ground columns");
+            const int nx = grid.dimensions.x, nz = grid.dimensions.z;
+            std::vector<int> floors(size_t(nx) * nz, -1);
+            for (int z = 0; z < nz; ++z) {
+                checkpoint(stop);
+                for (int x = 0; x < nx; ++x)
+                    for (int y = 0; y < grid.dimensions.y; ++y)
+                        if (grid.occupied({x, y, z}) && (!s.floor_below_seed ||
+                                                         grid.origin.y + y * s.voxel_size <= s.seed.y - 1.6f * s.units_per_meter)) {
+                            floors[size_t(z) * nx + x] = y;
+                            break;
+                        }
+            }
+            auto patched = floors;
+            int reach = static_cast<int>(std::min(std::ceil(2 * s.floor_size / s.voxel_size), float(std::max(nx, nz))));
+            uint64_t work = 0;
+            for (int z = 0; z < nz; ++z) {
+                checkpoint(stop);
+                for (int x = 0; x < nx; ++x) {
+                    if (floors[size_t(z) * nx + x] >= 0)
+                        continue;
+                    int height = grid.dimensions.y, hits = 0;
+                    for (auto d : {glm::ivec2(1, 0), glm::ivec2(-1, 0), glm::ivec2(0, 1), glm::ivec2(0, -1)}) {
+                        for (int n = 1; n <= reach; ++n) {
+                            if (++work > max_work)
+                                throw std::runtime_error("Floor patch work limit reached");
+                            auto p = glm::ivec2(x, z) + d * n;
+                            if (p.x < 0 || p.y < 0 || p.x >= nx || p.y >= nz)
+                                break;
+                            int h = floors[size_t(p.y) * nx + p.x];
+                            if (h >= 0) {
+                                ++hits;
+                                height = std::min(height, h);
+                                break;
+                            }
+                        }
+                    }
+                    if (hits == 4)
+                        patched[size_t(z) * nx + x] = height;
+                }
+            }
+            for (int z = 0; z < nz; ++z) {
+                checkpoint(stop);
+                for (int x = 0; x < nx; ++x)
+                    for (int y = 0; y < patched[size_t(z) * nx + x]; ++y)
+                        grid.solid[grid.index({x, y, z})] = 1;
+            }
+        }
+        if (s.carve_height > 0) {
+            report("Flooding navigable capsule space");
+            auto seed = grid.cell(s.seed);
+            if (!grid.contains(seed) || grid.capsuleIntersects(s.seed - glm::vec3(0, s.carve_height / 2, 0),
+                                                               {0, 1, 0}, s.carve_height, s.carve_radius))
+                throw std::runtime_error("Carve capsule does not fit at seed (seed denotes capsule center)");
+            auto blocked = capsuleDilate(grid, grid.solid, s.carve_height, s.carve_radius, stop);
+            const float horizontal_margin = s.carve_radius / s.voxel_size + 0.5f;
+            const float vertical_margin = s.carve_height / (2 * s.voxel_size) + 0.5f;
+            eachCell(grid, stop, [&](auto p) {
+                if (p.x < horizontal_margin || p.z < horizontal_margin ||
+                    grid.dimensions.x - 1 - p.x < horizontal_margin || grid.dimensions.z - 1 - p.z < horizontal_margin ||
+                    p.y < vertical_margin || grid.dimensions.y - 1 - p.y < vertical_margin)
+                    blocked[grid.index(p)] = 1;
+            });
+            if (blocked[grid.index(seed)])
+                throw std::runtime_error("Carve capsule does not fit at the seed voxel; move seed or reduce capsule");
+            auto reached = flood(grid, blocked, std::span(&seed, 1), stop);
+            auto navigable = capsuleDilate(grid, reached, s.carve_height, s.carve_radius, stop);
+            for (size_t i = 0; i < grid.solid.size(); ++i)
+                grid.solid[i] = grid.solid[i] || !navigable[i];
+        }
+        grid.validate();
+        report("Collision occupancy ready");
+        return grid;
+    }
+
     std::vector<uint32_t> CollisionVolume::octreeOccupancy() const {
         validate();
         return collision_detail::volumeTree(*this).nodes;
+    }
+    std::vector<uint32_t> CollisionVolume::gpuOccupancy() const {
+        validate();
+        const auto dense_tree = tree.empty() ? octreeOccupancy() : std::vector<uint32_t>{};
+        const auto& source = tree.empty() ? dense_tree : tree;
+        int root_size = 1;
+        while (root_size < std::max({dimensions.x, dimensions.y, dimensions.z}))
+            root_size *= 2;
+        std::vector<uint32_t> result(1);
+        std::function<void(uint32_t, uint32_t, int)> pack = [&](uint32_t src, uint32_t dst, int edge) {
+            if (source[src] <= 1) {
+                result[dst] = source[src];
+                return;
+            }
+            if (edge <= 4) {
+                const auto base = uint32_t(result.size());
+                result.resize(result.size() + 2);
+                result[dst] = 0x80000000u | base;
+                for (int z = 0; z < edge; ++z)
+                    for (int y = 0; y < edge; ++y)
+                        for (int x = 0; x < edge; ++x) {
+                            if (collision_detail::lookupLeaf(source, {x, y, z}, edge, src).solid) {
+                                auto bit = x + 4 * y + 16 * z;
+                                result[base + bit / 32] |= uint32_t(1) << (bit % 32);
+                            }
+                        }
+                return;
+            }
+            auto base = uint32_t(result.size());
+            result.resize(result.size() + 8);
+            result[dst] = base + 2;
+            for (int child = 0; child < 8; ++child)
+                pack(source[src] - 2 + child, base + child, edge / 2);
+        };
+        pack(0, 0, root_size);
+        return result;
     }
     void CollisionVolume::forEachSolidBox(const std::function<void(glm::ivec3, glm::ivec3)>& fn) const {
         if (!tree.empty()) {
@@ -456,5 +1013,256 @@ namespace lfs::core {
             count += uint64_t(d.x) * d.y * d.z;
         });
         return count;
+    }
+
+    CollisionMesh CollisionVolume::boundsMesh() const {
+        CollisionMesh result;
+        for (int c = 0; c < 8; ++c) {
+            const auto p = origin + glm::vec3((c & 1) ? dimensions.x : 0,
+                                              (c & 2) ? dimensions.y : 0,
+                                              (c & 4) ? dimensions.z : 0) *
+                                        settings.voxel_size;
+            result.vertices.insert(result.vertices.end(), {p.x, p.y, p.z});
+        }
+        result.indices = {0, 2, 3, 0, 3, 1, 4, 5, 7, 4, 7, 6, 0, 1, 5, 0, 5, 4,
+                          2, 6, 7, 2, 7, 3, 0, 4, 6, 0, 6, 2, 1, 3, 7, 1, 7, 5};
+        return result;
+    }
+
+    void WalkSettings::validate() const {
+        positive(units_per_meter, "Scene units per metre");
+        positive(height, "Player height");
+        positive(radius, "Player radius");
+        positive(speed, "Walk speed");
+        positive(step_height, "Step height", true);
+        positive(gravity, "Gravity");
+        if (height < 2 * radius || height > 10 * units_per_meter || radius > 5 * units_per_meter || speed > 50 * units_per_meter || step_height > height)
+            throw std::invalid_argument("Invalid walk capsule dimensions or speed");
+    }
+    glm::mat3 walkTangentFrame(glm::vec3 forward, glm::vec3 right, glm::vec3 up) {
+        if (!finite(forward) || !finite(right) || !finite(up) || glm::length(up) < 1e-6f)
+            throw std::invalid_argument("Invalid walk navigation frame");
+        up = glm::normalize(up);
+        forward -= up * glm::dot(forward, up);
+        if (glm::length(forward) < 1e-5f) {
+            right -= up * glm::dot(right, up);
+            if (glm::length(right) < 1e-5f) {
+                auto axis = std::abs(up.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 0, 1);
+                right = axis - up * glm::dot(axis, up);
+            }
+            forward = glm::cross(up, glm::normalize(right));
+        }
+        forward = glm::normalize(forward);
+        right = glm::normalize(glm::cross(forward, up));
+        return {right, up, -forward};
+    }
+    bool transformedCapsuleIntersects(const CollisionVolume& volume, const glm::mat4& transform,
+                                      glm::vec3 feet, glm::vec3 up, float height, float radius) {
+        if (std::abs(glm::determinant(glm::mat3(transform))) < 1e-10f)
+            throw std::invalid_argument("Collision node has a singular transform");
+        auto inverse = glm::inverse(transform);
+        auto linear = glm::mat3(inverse);
+        float norm1 = 0, norm_inf = 0, max_scale = 0;
+        bool orthogonal = true;
+        for (int a = 0; a < 3; ++a) {
+            float column = 0, row = 0;
+            max_scale = std::max(max_scale, glm::length(linear[a]));
+            for (int b = 0; b < 3; ++b) {
+                column += std::abs(linear[a][b]);
+                row += std::abs(linear[b][a]);
+                if (a != b && std::abs(glm::dot(linear[a], linear[b])) >
+                                  1e-5f * glm::length(linear[a]) * glm::length(linear[b]))
+                    orthogonal = false;
+            }
+            norm1 = std::max(norm1, column);
+            norm_inf = std::max(norm_inf, row);
+        }
+        float radius_scale = orthogonal ? max_scale : std::sqrt(norm1 * norm_inf);
+        auto local_up = linear * up;
+        float scale = glm::length(local_up);
+        auto normalized_up = local_up / scale;
+        float local_radius = radius * radius_scale;
+        float local_height = (height - 2 * radius) * scale + 2 * local_radius;
+        auto local_feet = glm::vec3(inverse * glm::vec4(feet + up * radius, 1)) -
+                          normalized_up * local_radius;
+        return volume.capsuleIntersects(local_feet, normalized_up, local_height, local_radius);
+    }
+    namespace {
+        struct WalkSweep {
+            glm::vec3 position;
+            bool hit = false;
+        };
+        // Sample at a fraction of capsule radius, then refine the first contact.
+        // Used for lift, travel and settling so thin ceilings are never skipped by
+        // a direct step-height teleport.
+        template <class Hit>
+        WalkSweep sweepWalk(glm::vec3 start, glm::vec3 delta, float spacing, float tolerance, const Hit& hit) {
+            const float length = glm::length(delta);
+            if (length == 0)
+                return {start};
+            const int count = std::max(1, int(std::ceil(length / spacing)));
+            float clear = 0;
+            for (int i = 1; i <= count; ++i) {
+                float contact = float(i) / count;
+                if (hit(start + delta * contact)) {
+                    for (int j = 0; j < 16 && (contact - clear) * length > tolerance; ++j) {
+                        const float middle = (clear + contact) * .5f;
+                        if (hit(start + delta * middle))
+                            contact = middle;
+                        else
+                            clear = middle;
+                    }
+                    return {start + delta * clear, true};
+                }
+                clear = contact;
+            }
+            return {start + delta};
+        }
+    } // namespace
+
+    void advanceWalk(WalkState& state, const WalkSettings& s, glm::vec3 up,
+                     glm::vec3 velocity, float dt, const CapsuleQuery& blocked) {
+        s.validate();
+        if (!finite(state.eye) || !finite(up) || !finite(velocity) || !std::isfinite(state.vertical_velocity) || !std::isfinite(dt) || dt < 0)
+            throw std::invalid_argument("Invalid walk integration input");
+        if (glm::length(up) < 1e-6f)
+            throw std::invalid_argument("Walk up axis must be nonzero");
+        if (dt == 0)
+            return;
+        up = glm::normalize(up);
+        dt = std::min(dt, 0.1f);
+        velocity -= up * glm::dot(velocity, up);
+        auto feet = state.eye - up * s.height;
+        const float spacing = std::min(0.02f * s.units_per_meter, s.radius / 3);
+        const float tolerance = std::min(0.0001f * s.units_per_meter, s.radius * .001f);
+        const int steps = std::clamp(int(std::ceil((glm::length(velocity) * dt +
+                                                    std::abs(state.vertical_velocity) * dt + s.gravity * dt * dt) /
+                                                   spacing)),
+                                     1, 1024);
+        const float tick = dt / steps;
+        auto hit = [&](glm::vec3 p) { return blocked(p, up, s.height, s.radius); };
+        auto sweep = [&](glm::vec3 p, glm::vec3 delta) { return sweepWalk(p, delta, spacing, tolerance, hit); };
+        auto tryStep = [&](glm::vec3 displacement) {
+            if (!state.grounded || s.step_height == 0)
+                return false;
+            // Find the first height where the lower cap clears the riser. Using
+            // the lower cap here avoids rejecting a small step just because a
+            // low ceiling prevents lifting the entire body by the maximum budget.
+            auto footHit = [&](float lift) {
+                return blocked(feet + displacement + up * lift, up, 2 * s.radius, s.radius);
+            };
+            if (!footHit(0))
+                return false;
+            const int count = std::max(1, int(std::ceil(s.step_height / spacing)));
+            float low = 0;
+            for (int i = 1; i <= count; ++i) {
+                float high = s.step_height * i / count;
+                if (footHit(high)) {
+                    low = high;
+                    continue;
+                }
+                for (int j = 0; j < 16 && high - low > tolerance; ++j) {
+                    float middle = (low + high) * .5f;
+                    if (footHit(middle))
+                        low = middle;
+                    else
+                        high = middle;
+                }
+                const auto lift = sweep(feet, up * high);
+                if (lift.hit)
+                    return false;
+                const auto travel = sweep(lift.position, displacement);
+                if (travel.hit)
+                    return false;
+                const auto support = sweep(travel.position, -up * (high + 2 * tolerance));
+                if (!support.hit)
+                    return false;
+                feet = support.position;
+                state.vertical_velocity = 0;
+                return true;
+            }
+            return false;
+        };
+        for (int step = 0; step < steps; ++step) {
+            const bool was_grounded = state.grounded;
+            const auto displacement = velocity * tick;
+            const auto destination = feet + displacement;
+            const auto travel = sweep(feet, displacement);
+            if (!travel.hit) {
+                feet = travel.position;
+            } else if (!tryStep(displacement)) {
+                feet = travel.position;
+                const auto remaining = destination - feet;
+                // Slide the remaining projected axis components independently.
+                // Every component is swept, including partial travel to a wall.
+                for (int a = 0; a < 3; ++a) {
+                    glm::vec3 d(0);
+                    d[a] = remaining[a];
+                    d -= up * glm::dot(d, up);
+                    feet = sweep(feet, d).position;
+                }
+            }
+            // Follow small downward steps only while supported. No floor within
+            // the step budget means a real ledge: retain the pose and start falling.
+            if (was_grounded && state.vertical_velocity <= 0) {
+                const auto support = sweep(feet, -up * std::max(s.step_height, 2 * tolerance));
+                if (support.hit) {
+                    feet = support.position;
+                    state.grounded = true;
+                    state.vertical_velocity = 0;
+                    continue;
+                }
+            }
+            state.vertical_velocity -= s.gravity * tick;
+            const auto vertical = sweep(feet, up * state.vertical_velocity * tick);
+            feet = vertical.position;
+            state.grounded = vertical.hit && state.vertical_velocity <= 0;
+            if (vertical.hit)
+                state.vertical_velocity = 0;
+        }
+        state.eye = feet + up * s.height;
+    }
+
+    void advanceWalkCamera(WalkCameraState& camera, const WalkState& body, const WalkSettings& s,
+                           glm::vec3 up, float dt, const CapsuleQuery& blocked) {
+        s.validate();
+        if (!finite(camera.eye) || !finite(camera.body_eye) || !finite(body.eye) || !finite(up) ||
+            !std::isfinite(camera.height_offset) || !std::isfinite(camera.offset_velocity) ||
+            !std::isfinite(dt) || dt < 0 || glm::length(up) < 1e-6f)
+            throw std::invalid_argument("Invalid walk camera input");
+        up = glm::normalize(up);
+        dt = std::min(dt, .1f);
+        // Cancel only grounded height changes, not ballistic falling. Then decay
+        // the presentation offset with an analytic critically damped spring.
+        if (body.grounded)
+            camera.height_offset += glm::dot(camera.body_eye - body.eye, up);
+        constexpr float omega = 20;
+        const float c = camera.offset_velocity + omega * camera.height_offset;
+        const float decay = std::exp(-omega * dt);
+        camera.height_offset = (camera.height_offset + c * dt) * decay;
+        camera.offset_velocity = (camera.offset_velocity - omega * c * dt) * decay;
+        const float limit = std::min(s.step_height, s.height * .25f);
+        const float offset = std::clamp(camera.height_offset, -limit, limit);
+        if (offset != camera.height_offset)
+            camera.offset_velocity = 0;
+        camera.height_offset = offset;
+        const float spacing = std::min(.02f * s.units_per_meter, s.radius / 3);
+        const float tolerance = std::min(.0001f * s.units_per_meter, s.radius * .001f);
+        auto headHit = [&](glm::vec3 eye) {
+            return blocked(eye - up * (2 * s.radius), up, 2 * s.radius, s.radius);
+        };
+        // The camera may lag above the physical head on a downward step. Sweep
+        // its upper-cap proxy from the safe body pose and clamp at any overhang.
+        const auto allowed = sweepWalk(body.eye, up * offset, spacing, tolerance, headHit);
+        if (allowed.hit) {
+            camera.height_offset = glm::dot(allowed.position - body.eye, up);
+            camera.offset_velocity = 0;
+        }
+        if (std::abs(camera.height_offset) < tolerance && std::abs(camera.offset_velocity) < tolerance * omega) {
+            camera.height_offset = 0;
+            camera.offset_velocity = 0;
+        }
+        camera.body_eye = body.eye;
+        camera.eye = body.eye + up * camera.height_offset;
     }
 } // namespace lfs::core
