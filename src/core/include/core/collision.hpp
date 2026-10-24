@@ -137,7 +137,10 @@ namespace lfs::core {
         [[nodiscard]] std::vector<uint32_t> gpuOccupancy() const;
         [[nodiscard]] uint64_t occupiedCount() const;
         void forEachSolidBox(const std::function<void(glm::ivec3, glm::ivec3)>& fn) const;
+        [[nodiscard]] CollisionMesh mesh(CollisionShape shape, std::stop_token stop = {}, CollisionProgress progress = {}) const;
         [[nodiscard]] CollisionMesh boundsMesh() const;
+        // Explicit surface-only approximation. Walk/preview keep original occupancy.
+        [[nodiscard]] CollisionVolume coarsened(int stride, std::stop_token stop = {}) const;
     };
 
     using CollisionVoxelizer = CollisionVolume (*)(std::span<const CollisionGaussian>, CollisionSettings,

@@ -214,6 +214,132 @@ namespace lfs::core {
                 result[i] = distance[i] < threshold;
             return result;
         }
+        void simplifyCoplanar(CollisionMesh& mesh, std::stop_token stop,
+                              std::vector<std::array<int32_t, 3>>* keys = nullptr) {
+            const size_t vertices = mesh.vertices.size() / 3, faces = mesh.indices.size() / 3;
+            std::vector<std::vector<int32_t>> incident(vertices);
+            std::vector<uint8_t> alive(faces, 1);
+            for (size_t f = 0; f < faces; ++f)
+                for (int a = 0; a < 3; ++a)
+                    incident[mesh.indices[f * 3 + a]].push_back(int32_t(f));
+            auto point = [&](int v) { return glm::vec3(mesh.vertices[v * 3], mesh.vertices[v * 3 + 1], mesh.vertices[v * 3 + 2]); };
+            auto neighbors = [&](int v) {
+                std::vector<int> result;
+                for (int f : incident[v]) {
+                    if (!alive[f])
+                        continue;
+                    bool has_vertex = false;
+                    for (int a = 0; a < 3; ++a)
+                        has_vertex |= mesh.indices[f * 3 + a] == v;
+                    if (!has_vertex)
+                        continue;
+                    for (int a = 0; a < 3; ++a)
+                        if (int n = mesh.indices[f * 3 + a]; n != v)
+                            result.push_back(n);
+                }
+                std::sort(result.begin(), result.end());
+                result.erase(std::unique(result.begin(), result.end()), result.end());
+                return result;
+            };
+            // Collapse only strictly coplanar interior stars. The link condition
+            // preserves manifold topology; orientation checks reject foldovers.
+            for (size_t v = 0; v < vertices; ++v) {
+                if ((v & 1023) == 0)
+                    checkpoint(stop);
+                auto ns = neighbors(int(v));
+                if (ns.size() < 3)
+                    continue;
+                std::vector<int> star;
+                glm::vec3 normal(0);
+                bool planar = true;
+                for (int f : incident[v]) {
+                    if (!alive[f])
+                        continue;
+                    auto a = mesh.indices[f * 3], b = mesh.indices[f * 3 + 1], c = mesh.indices[f * 3 + 2];
+                    if (a != int(v) && b != int(v) && c != int(v))
+                        continue;
+                    auto n = glm::cross(point(b) - point(a), point(c) - point(a));
+                    float length = glm::length(n);
+                    if (length < 1e-15f) {
+                        planar = false;
+                        break;
+                    }
+                    n /= length;
+                    if (star.empty())
+                        normal = n;
+                    else if (glm::dot(normal, n) < 0.999999f) {
+                        planar = false;
+                        break;
+                    }
+                    star.push_back(f);
+                }
+                if (!planar || star.size() != ns.size())
+                    continue;
+                for (int u : ns) {
+                    auto other = neighbors(u);
+                    std::vector<int> shared;
+                    std::set_intersection(ns.begin(), ns.end(), other.begin(), other.end(), std::back_inserter(shared));
+                    if (shared.size() != 2)
+                        continue;
+                    bool valid = true;
+                    int removed = 0;
+                    for (int f : star) {
+                        auto a = mesh.indices[f * 3], b = mesh.indices[f * 3 + 1], c = mesh.indices[f * 3 + 2];
+                        if (a == u || b == u || c == u) {
+                            ++removed;
+                            continue;
+                        }
+                        if (a == int(v))
+                            a = u;
+                        if (b == int(v))
+                            b = u;
+                        if (c == int(v))
+                            c = u;
+                        if (glm::dot(glm::cross(point(b) - point(a), point(c) - point(a)), normal) <= 1e-15f) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (!valid || removed != 2)
+                        continue;
+                    for (int f : star) {
+                        bool has_target = false;
+                        for (int a = 0; a < 3; ++a)
+                            has_target |= mesh.indices[f * 3 + a] == u;
+                        if (has_target) {
+                            alive[f] = 0;
+                            continue;
+                        }
+                        for (int a = 0; a < 3; ++a)
+                            if (mesh.indices[f * 3 + a] == int(v))
+                                mesh.indices[f * 3 + a] = u;
+                        incident[u].push_back(f);
+                    }
+                    break;
+                }
+            }
+            CollisionMesh compact;
+            std::vector<std::array<int32_t, 3>> compact_keys;
+            std::vector<int32_t> remap(vertices, -1);
+            for (size_t f = 0; f < faces; ++f) {
+                if (!alive[f])
+                    continue;
+                for (int a = 0; a < 3; ++a) {
+                    auto old = mesh.indices[f * 3 + a];
+                    if (remap[old] < 0) {
+                        remap[old] = int32_t(compact.vertices.size() / 3);
+                        auto p = point(old);
+                        compact.vertices.insert(compact.vertices.end(), {p.x, p.y, p.z});
+                        if (keys)
+                            compact_keys.push_back((*keys)[old]);
+                    }
+                    compact.indices.push_back(remap[old]);
+                }
+            }
+            mesh = std::move(compact);
+            if (keys)
+                *keys = std::move(compact_keys);
+        }
     } // namespace
 
     void CollisionSettings::applyPreset(CollisionPreset value) {
@@ -1014,6 +1140,231 @@ namespace lfs::core {
         });
         return count;
     }
+    CollisionMesh CollisionVolume::mesh(CollisionShape shape, std::stop_token stop, CollisionProgress progress) const {
+        validate();
+        if (progress)
+            progress(0, "Building collision surface");
+        CollisionMesh result, output;
+        std::vector<std::array<int32_t, 3>> keys;
+        std::unordered_map<std::array<int32_t, 3>, int32_t, GridPointHash> seams;
+        const auto occupancy = collision_detail::volumeTree(*this, stop);
+        // Integer half-grid coordinates weld neighboring cubes exactly.
+        std::unordered_map<std::array<int32_t, 3>, int32_t, GridPointHash> vertices;
+        auto vertex = [&](glm::ivec3 p) {
+            const std::array<int32_t, 3> k{p.x, p.y, p.z};
+            if (auto it = vertices.find(k); it != vertices.end())
+                return it->second;
+            if (result.vertices.size() / 3 >= 16'000'000)
+                throw std::runtime_error("Collision mesh vertex limit reached; increase voxel size");
+            auto id = static_cast<int32_t>(result.vertices.size() / 3);
+            auto v = origin + glm::vec3(p) * (settings.voxel_size / 2);
+            result.vertices.insert(result.vertices.end(), {v.x, v.y, v.z});
+            keys.push_back(k);
+            vertices.emplace(k, id);
+            return id;
+        };
+        auto triangle = [&](int a, int b, int c) {
+            if (result.indices.size() >= 96'000'000)
+                throw std::runtime_error("Collision mesh triangle limit reached; increase voxel size");
+            result.indices.insert(result.indices.end(), {a, b, c});
+        };
+        uint64_t work = 0, chunks = 0;
+        std::function<void(glm::ivec3, int, float, float)> build = [&](glm::ivec3 lo, int n, float start, float end) {
+            checkpoint(stop);
+            const auto halo = shape == CollisionShape::Faces ? glm::ivec3(1) : glm::ivec3(0);
+            if (occupancy.uniform(lo - halo, lo + n + 1) >= 0)
+                return;
+            if (n > 32) {
+                for (int child = 0; child < 8; ++child)
+                    build(lo + glm::ivec3(child & 1, (child >> 1) & 1, child >> 2) * (n / 2), n / 2,
+                          start + (end - start) * child / 8, start + (end - start) * (child + 1) / 8);
+                return;
+            }
+            work += uint64_t(n) * n * n;
+            if (work > 2'000'000'000ULL)
+                throw std::runtime_error("Sparse mesh active-chunk work budget exceeded");
+            const int stride = n + 2;
+            const auto cache_lo = lo - 1;
+            std::vector<uint8_t> cache(size_t(stride) * stride * stride, 0);
+            occupancy.visit(cache_lo, lo + n + 1, [&](const collision_detail::Leaf& l) {
+                if (!l.solid)
+                    return;
+                auto a = glm::max(l.min, cache_lo), b = glm::min(l.max(), glm::min(lo + n + 1, dimensions));
+                for (int z = a.z; z < b.z; ++z)
+                    for (int y = a.y; y < b.y; ++y)
+                        std::fill_n(cache.begin() + ((z - cache_lo.z) * stride + y - cache_lo.y) * stride + a.x - cache_lo.x,
+                                    b.x - a.x, uint8_t(1));
+            });
+            auto cached = [&](glm::ivec3 p) {
+                auto q = p - cache_lo;
+                return cache[(q.z * stride + q.y) * stride + q.x] != 0;
+            };
+            if (shape == CollisionShape::Faces) {
+                for (int z = std::max(lo.z, 0); z < std::min(lo.z + n, dimensions.z); ++z)
+                    for (int y = std::max(lo.y, 0); y < std::min(lo.y + n, dimensions.y); ++y)
+                        for (int x = std::max(lo.x, 0); x < std::min(lo.x + n, dimensions.x); ++x) {
+                            glm::ivec3 p(x, y, z);
+                            if (!cached(p))
+                                continue;
+                            for (auto normal : directions) {
+                                if (cached(p + normal))
+                                    continue;
+                                int axis = normal.x ? 0 : normal.y ? 1
+                                                                   : 2;
+                                int u = (axis + 1) % 3, v = (axis + 2) % 3;
+                                glm::ivec3 q = p * 2;
+                                if (normal[axis] > 0)
+                                    q[axis] += 2;
+                                glm::ivec3 du(0), dv(0);
+                                du[u] = 2;
+                                dv[v] = 2;
+                                int a = vertex(q), b = vertex(q + du), c = vertex(q + du + dv), d = vertex(q + dv);
+                                if (normal[axis] > 0) {
+                                    triangle(a, b, c);
+                                    triangle(a, c, d);
+                                } else {
+                                    triangle(a, c, b);
+                                    triangle(a, d, c);
+                                }
+                            }
+                        }
+            } else {
+                // Table-free marching cubes: face contours link crossing cube edges.
+                // Four-crossing faces consistently isolate solid corners, resolving
+                // ambiguous shared faces identically from either adjacent cube.
+                constexpr glm::ivec3 corners[] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+                constexpr int edges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+                constexpr int faces[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 9, 4, 8}, {2, 10, 6, 11}, {3, 11, 7, 8}, {1, 10, 5, 9}};
+                constexpr glm::ivec3 face_normals[] = {{0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {0, 1, 0}, {-1, 0, 0}, {1, 0, 0}};
+                for (int z = lo.z; z < std::min(lo.z + n, dimensions.z); ++z)
+                    for (int y = lo.y; y < std::min(lo.y + n, dimensions.y); ++y)
+                        for (int x = lo.x; x < std::min(lo.x + n, dimensions.x); ++x) {
+                            glm::ivec3 p(x, y, z);
+                            bool inside[8];
+                            int count = 0;
+                            for (int i = 0; i < 8; ++i) {
+                                inside[i] = cached(p + corners[i]);
+                                count += inside[i];
+                            }
+                            if (!count || count == 8)
+                                continue;
+                            int ids[12], next_edge[12];
+                            std::fill_n(ids, 12, -1);
+                            std::fill_n(next_edge, 12, -1);
+                            for (int e = 0; e < 12; ++e)
+                                if (inside[edges[e][0]] != inside[edges[e][1]])
+                                    ids[e] = vertex(p * 2 + corners[edges[e][0]] + corners[edges[e][1]] + glm::ivec3(1));
+                            for (int face_index = 0; face_index < 6; ++face_index) {
+                                const auto& face = faces[face_index];
+                                auto link = [&](int a, int b) {
+                                    auto edge = edges[a];
+                                    auto outward = glm::vec3(corners[inside[edge[0]] ? edge[1] : edge[0]] -
+                                                             corners[inside[edge[0]] ? edge[0] : edge[1]]);
+                                    auto delta = glm::vec3(corners[edges[b][0]] + corners[edges[b][1]] -
+                                                           corners[edges[a][0]] - corners[edges[a][1]]);
+                                    if (glm::dot(delta, glm::cross(outward, glm::vec3(face_normals[face_index]))) > 0)
+                                        next_edge[a] = b;
+                                    else
+                                        next_edge[b] = a;
+                                };
+                                int crossing[4], n = 0;
+                                for (auto e : face)
+                                    if (ids[e] >= 0)
+                                        crossing[n++] = e;
+                                if (n == 2)
+                                    link(crossing[0], crossing[1]);
+                                else if (n == 4) {
+                                    // Pair the two edges adjacent to each solid face corner.
+                                    for (int i = 0; i < 4; ++i) {
+                                        int e = face[i], f = face[(i + 1) % 4], shared = -1;
+                                        for (int a : edges[e])
+                                            for (int b : edges[f])
+                                                if (a == b)
+                                                    shared = a;
+                                        if (shared >= 0 && inside[shared])
+                                            link(e, f);
+                                    }
+                                }
+                            }
+                            bool used[12]{};
+                            for (int e = 0; e < 12; ++e) {
+                                if (ids[e] < 0 || used[e])
+                                    continue;
+                                std::vector<int> loop;
+                                int current = e;
+                                do {
+                                    if (next_edge[current] < 0 || used[current])
+                                        throw std::runtime_error("Invalid marching-cubes contour");
+                                    used[current] = true;
+                                    loop.push_back(ids[current]);
+                                    current = next_edge[current];
+                                } while (current != e);
+                                if (loop.size() < 3)
+                                    continue;
+                                if (loop.size() == 3) {
+                                    triangle(loop[0], loop[1], loop[2]);
+                                } else {
+                                    // An interior fan avoids introducing a diagonal on
+                                    // a shared cube face (which could have four incident
+                                    // triangles when the neighboring cube chooses it too).
+                                    glm::vec3 center(0);
+                                    for (auto id : loop)
+                                        center += glm::vec3(result.vertices[id * 3], result.vertices[id * 3 + 1], result.vertices[id * 3 + 2]);
+                                    center /= float(loop.size());
+                                    if (result.vertices.size() / 3 >= 16'000'000)
+                                        throw std::runtime_error("Collision mesh vertex limit reached; increase voxel size");
+                                    auto id = int32_t(result.vertices.size() / 3);
+                                    result.vertices.insert(result.vertices.end(), {center.x, center.y, center.z});
+                                    keys.push_back({INT32_MAX, INT32_MAX, INT32_MAX});
+                                    for (size_t i = 0; i < loop.size(); ++i)
+                                        triangle(id, loop[i], loop[(i + 1) % loop.size()]);
+                                }
+                            }
+                        }
+            }
+            if (shape == CollisionShape::Smooth)
+                simplifyCoplanar(result, stop, &keys);
+            std::vector<int32_t> remap(result.vertices.size() / 3);
+            for (size_t i = 0; i < remap.size(); ++i) {
+                const auto& key = keys[i];
+                bool seam = false;
+                for (int axis = 0; axis < 3; ++axis) {
+                    int shift = shape == CollisionShape::Smooth ? 1 : 0;
+                    seam |= key[axis] == lo[axis] * 2 + shift || key[axis] == (lo[axis] + n) * 2 + shift;
+                }
+                if (seam) {
+                    if (auto existing = seams.find(key); existing != seams.end()) {
+                        remap[i] = existing->second;
+                        continue;
+                    }
+                }
+                if (output.vertices.size() / 3 >= CollisionMesh::max_vertices)
+                    throw std::runtime_error("Collision output mesh vertex memory budget exceeded");
+                remap[i] = int32_t(output.vertices.size() / 3);
+                output.vertices.insert(output.vertices.end(), result.vertices.begin() + i * 3, result.vertices.begin() + i * 3 + 3);
+                if (seam)
+                    seams.emplace(key, remap[i]);
+            }
+            if (output.indices.size() + result.indices.size() > CollisionMesh::max_indices)
+                throw std::runtime_error("Collision output mesh index memory budget exceeded");
+            for (auto index : result.indices)
+                output.indices.push_back(remap[index]);
+            result.vertices.clear();
+            result.indices.clear();
+            vertices.clear();
+            keys.clear();
+            if (progress && (++chunks == 1 || chunks % 32 == 0))
+                progress(end, std::format("Surface: {} chunks, {} triangles", chunks, output.indices.size() / 3));
+        };
+        int root_size = 1;
+        while (root_size < std::max({dimensions.x, dimensions.y, dimensions.z}) + 1)
+            root_size *= 2;
+        build(glm::ivec3(-1), root_size, 0, 1);
+        if (progress)
+            progress(1, "Collision surface ready");
+        checkpoint(stop);
+        return output;
+    }
 
     CollisionMesh CollisionVolume::boundsMesh() const {
         CollisionMesh result;
@@ -1027,6 +1378,46 @@ namespace lfs::core {
         result.indices = {0, 2, 3, 0, 3, 1, 4, 5, 7, 4, 7, 6, 0, 1, 5, 0, 5, 4,
                           2, 6, 7, 2, 7, 3, 0, 4, 6, 0, 6, 2, 1, 3, 7, 1, 7, 5};
         return result;
+    }
+
+    CollisionVolume CollisionVolume::coarsened(int stride, std::stop_token stop) const {
+        checkpoint(stop);
+        if (stride < 1 || stride > 16 || (stride & (stride - 1)))
+            throw std::invalid_argument("Surface stride must be a power of two from 1 to 16");
+        validate();
+        CollisionVolume out;
+        out.settings = settings;
+        out.settings.voxel_size *= stride;
+        out.origin = origin;
+        out.dimensions = (dimensions + stride - 1) / stride;
+        collision_detail::Tree reduced(out.dimensions, stop);
+        if (tree.empty()) {
+            forEachSolidBox([&](auto lo, auto hi) { reduced.setBox(lo / stride, (hi + stride - 1) / stride); });
+        } else {
+            auto anySolid = [&](auto&& self, uint32_t i) -> bool {
+                if (tree[i] <= 1)
+                    return tree[i] != 0;
+                for (int c = 0; c < 8; ++c)
+                    if (self(self, tree[i] - 2 + c))
+                        return true;
+                return false;
+            };
+            auto visit = [&](auto&& self, uint32_t src, uint32_t dst, int edge) -> void {
+                checkpoint(stop);
+                if (tree[src] <= 1 || edge <= stride) {
+                    reduced.nodes[dst] = anySolid(anySolid, src);
+                    return;
+                }
+                auto base = uint32_t(reduced.nodes.size());
+                reduced.nodes.resize(reduced.nodes.size() + 8);
+                reduced.nodes[dst] = base + 2;
+                for (int c = 0; c < 8; ++c)
+                    self(self, tree[src] - 2 + c, base + c, edge / 2);
+            };
+            visit(visit, 0, 0, tree_size);
+        }
+        collision_detail::storeTree(out, std::move(reduced));
+        return out;
     }
 
     void WalkSettings::validate() const {

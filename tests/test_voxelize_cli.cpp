@@ -3,6 +3,7 @@
 #include "app/voxelizer.hpp"
 #include "core/argument_parser.hpp"
 #include "core/collision_source.hpp"
+#include "core/mesh_data.hpp"
 #include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "core/uuid.hpp"
@@ -259,4 +260,16 @@ TEST(CollisionSource, ParallelExtractionPreservesTransformsDeletionAndStableOrde
     EXPECT_THROW((void)extractCollisionSource(snapshots, frame, stop.get_token()), std::runtime_error);
     snapshots[0].scaling = Tensor{};
     EXPECT_THROW((void)extractCollisionSource(snapshots, frame), std::invalid_argument);
+}
+
+TEST(CollisionMesh, NativeNormalsMatchWindingAndSupportCancellation) {
+    const CollisionMesh data{{0, 0, 0, 1, 0, 0, 0, 1, 0}, {0, 1, 2}};
+    const auto mesh = makeCollisionMesh(data);
+    EXPECT_EQ(mesh->vertices.to_vector(), data.vertices);
+    EXPECT_EQ(mesh->indices.to_vector_int(), data.indices);
+    EXPECT_EQ(mesh->normals.to_vector(), (std::vector<float>{0, 0, 1, 0, 0, 1, 0, 0, 1}));
+    std::stop_source stop;
+    stop.request_stop();
+    EXPECT_THROW((void)makeCollisionMesh(data, stop.get_token()), std::runtime_error);
+    EXPECT_THROW((void)makeCollisionMesh({}), std::runtime_error);
 }

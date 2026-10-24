@@ -56,6 +56,28 @@ namespace {
                 for (int x = 0; x < a.dimensions.x; ++x)
                     ASSERT_EQ(a.occupied({x, y, z}), b.occupied({x, y, z})) << x << "," << y << "," << z;
     }
+    void watertight(const CollisionMesh& mesh) {
+        ASSERT_FALSE(mesh.indices.empty());
+        std::map<std::pair<int, int>, std::pair<int, int>> edges;
+        for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+            for (int a = 0; a < 3; ++a) {
+                int u = mesh.indices[i + a], v = mesh.indices[i + (a + 1) % 3];
+                ASSERT_NE(u, v);
+                auto& edge = edges[std::minmax(u, v)];
+                ++edge.first;
+                edge.second += u < v ? 1 : -1;
+            }
+            auto p = [&](int a) {
+                auto index = mesh.indices[i + a] * 3;
+                return glm::vec3(mesh.vertices[index], mesh.vertices[index + 1], mesh.vertices[index + 2]);
+            };
+            EXPECT_GT(glm::length(glm::cross(p(1) - p(0), p(2) - p(0))), 1e-10f);
+        }
+        for (const auto& [edge, counts] : edges) {
+            EXPECT_EQ(counts.first, 2) << edge.first << "," << edge.second;
+            EXPECT_EQ(counts.second, 0) << edge.first << "," << edge.second;
+        }
+    }
     auto recordProgress(std::vector<float>& values) {
         return [&values](float value, const std::string& stage) {
             EXPECT_GE(value, values.empty() ? 0 : values.back());
@@ -94,7 +116,7 @@ TEST(CollisionProgress, GenerationReportsMonotonicFractionsAcrossFilterModes) {
             EXPECT_GT(result.occupiedCount(), 0u);
         }
 }
-TEST(CollisionProgress, PostprocessingProgressRespectsCancellation) {
+TEST(CollisionProgress, PostprocessingAndSurfaceProgressRespectCancellation) {
     auto checkJob = [](auto operation) {
         std::vector<float> values;
         operation(std::stop_token{}, recordProgress(values));
@@ -125,6 +147,11 @@ TEST(CollisionProgress, PostprocessingProgressRespectsCancellation) {
                 v = sparse(std::move(v));
             checkJob([&](auto stop, auto report) { (void)processCollisionVolume(v, stop, report); });
         }
+    auto v = grid({35, 12, 35});
+    box(v, {1, 1, 1}, {33, 10, 33}, true);
+    v = sparse(std::move(v));
+    for (auto shape : {CollisionShape::Faces, CollisionShape::Smooth})
+        checkJob([&](auto stop, auto report) { EXPECT_FALSE(v.mesh(shape, stop, report).indices.empty()); });
 }
 TEST(CollisionSettings, PresetsDomainsAndBounds) {
     CollisionSettings s;
@@ -231,6 +258,7 @@ TEST(CollisionPipeline, CancellationIsExplicit) {
     std::stop_source source;
     source.request_stop();
     EXPECT_THROW((void)processCollisionVolume(g, source.get_token()), std::runtime_error);
+    EXPECT_THROW((void)g.mesh(CollisionShape::Faces, source.get_token()), std::runtime_error);
 }
 TEST(CollisionSparse, DistantGaussianComponentsDoNotAllocateEmptyWorldBounds) {
     CollisionSettings s;
@@ -246,6 +274,8 @@ TEST(CollisionSparse, DistantGaussianComponentsDoNotAllocateEmptyWorldBounds) {
     EXPECT_TRUE(g.occupied(g.cell(source.back().center)));
     EXPECT_FALSE(g.occupied(g.cell({20'000, 20'000, 20'000})));
     EXPECT_TRUE(g.capsuleIntersects({39'999.9f, 39'999.9f, 40'000}, {0, 1, 0}, 0.2f, 0.05f));
+    watertight(g.mesh(CollisionShape::Faces));
+    watertight(g.mesh(CollisionShape::Smooth));
     const auto restored = nlohmann::json(g).get<CollisionVolume>();
     EXPECT_EQ(restored, g);
     EXPECT_LT(nlohmann::json(g).dump().size(), 10'000u);
@@ -373,6 +403,25 @@ TEST(CollisionSparse, BatchedFloorPreservesUnevenHeightsHolesAndPadding) {
                  }),
                  std::runtime_error);
 }
+TEST(CollisionSparse, FacesAndSmoothRemainWatertightAcrossChunkAndBrickSeams) {
+    auto g = grid({70, 12, 70});
+    box(g, {1, 1, 1}, {68, 10, 68}, true);
+    uint64_t faces = 0;
+    for (int z = 0; z < g.dimensions.z; ++z)
+        for (int y = 0; y < g.dimensions.y; ++y)
+            for (int x = 0; x < g.dimensions.x; ++x)
+                if (g.occupied({x, y, z}))
+                    for (auto normal : {glm::ivec3(1, 0, 0), glm::ivec3(-1, 0, 0), glm::ivec3(0, 1, 0),
+                                        glm::ivec3(0, -1, 0), glm::ivec3(0, 0, 1), glm::ivec3(0, 0, -1)})
+                        faces += !g.occupied(glm::ivec3(x, y, z) + normal);
+    g = sparse(std::move(g));
+    EXPECT_TRUE(g.occupied({31, 1, 31}));
+    EXPECT_FALSE(g.occupied({32, 2, 32}));
+    const auto mesh = g.mesh(CollisionShape::Faces);
+    watertight(mesh);
+    watertight(g.mesh(CollisionShape::Smooth));
+    EXPECT_EQ(faces * 6, mesh.indices.size());
+}
 TEST(CollisionSparse, PointLookupPreservesPartialDimensionsAndSubtreeCoordinates) {
     auto dense = grid({9, 7, 11});
     for (size_t i = 0; i < dense.solid.size(); ++i)
@@ -415,6 +464,46 @@ TEST(CollisionSparse, PersistenceRejectsMalformedTopologyAndCoordinateOverflow) 
     j = nlohmann::json(v);
     j["dimensions"] = {1 << 22, 1, 1};
     EXPECT_THROW((void)j.get<CollisionVolume>(), std::invalid_argument);
+}
+TEST(CollisionMesh, WatertightFacesAndSmoothWithCoplanarReduction) {
+    auto g = grid({16, 16, 16});
+    box(g, {2, 2, 2}, {12, 12, 12});
+    auto faces = g.mesh(CollisionShape::Faces), smooth = g.mesh(CollisionShape::Smooth);
+    watertight(faces);
+    watertight(smooth);
+    EXPECT_LT(smooth.indices.size(), faces.indices.size());
+}
+TEST(CollisionMesh, EveryMarchingCubeConfigurationIsWatertight) {
+    for (int mask = 1; mask < 255; ++mask) {
+        SCOPED_TRACE(mask);
+        auto g = grid({4, 4, 4});
+        for (int z = 0; z < 2; ++z)
+            for (int y = 0; y < 2; ++y)
+                for (int x = 0; x < 2; ++x)
+                    if (mask & (1 << (x + y * 2 + z * 4)))
+                        g.solid[g.index({x + 1, y + 1, z + 1})] = 1;
+        watertight(g.mesh(CollisionShape::Smooth));
+    }
+}
+TEST(CollisionMesh, ElongatedGridDoesNotAliasVertexKeys) {
+    auto g = grid({1'100'000, 2, 2}, 1);
+    g.solid[g.index({0, 0, 0})] = 1;
+    g.solid[g.index({1'099'999, 1, 1})] = 1;
+    auto mesh = g.mesh(CollisionShape::Faces);
+    EXPECT_EQ(mesh.vertices.size() / 3, 16u);
+    watertight(mesh);
+}
+TEST(CollisionMesh, RandomMultiCubeVolumesPreserveWatertightTopologyAfterSimplification) {
+    std::mt19937 random(74174);
+    for (int trial = 0; trial < 30; ++trial) {
+        SCOPED_TRACE(trial);
+        auto g = grid({12, 12, 12});
+        for (int z = 2; z < 10; ++z)
+            for (int y = 2; y < 10; ++y)
+                for (int x = 2; x < 10; ++x)
+                    g.solid[g.index({x, y, z})] = random() % 3 != 0;
+        watertight(g.mesh(CollisionShape::Smooth));
+    }
 }
 TEST(CollisionPersistence, RleRoundTripAndMalformedPayload) {
     auto g = grid();
@@ -508,6 +597,28 @@ TEST(CollisionPipeline, IndoorFiveCentimeterCarve) {
     g.settings.seed = {3, 1.8f, 3};
     auto carved = processCollisionVolume(std::move(g));
     EXPECT_FALSE(carved.occupied(carved.cell({3, 1.8f, 3})));
+}
+
+TEST(CollisionAuthoring, CoarseSurfaceRetainsAllSupportsWithoutChangingWalkData) {
+    auto g = grid({17, 13, 19});
+    box(g, {1, 2, 3}, {3, 4, 5});
+    g.solid[g.index({16, 12, 18})] = 1;
+    const auto before = g.solid;
+    const auto coarse = g.coarsened(4);
+    EXPECT_EQ(coarse.dimensions, glm::ivec3(5, 4, 5));
+    EXPECT_FLOAT_EQ(coarse.settings.voxel_size, g.settings.voxel_size * 4);
+    for (int z = 0; z < 19; ++z)
+        for (int y = 0; y < 13; ++y)
+            for (int x = 0; x < 17; ++x)
+                if (g.occupied({x, y, z}))
+                    EXPECT_TRUE(coarse.occupied(glm::ivec3(x, y, z) / 4));
+    EXPECT_EQ(g.solid, before);
+    EXPECT_EQ(g.boundsMesh().vertices.size(), 24u);
+    EXPECT_EQ(g.boundsMesh().indices.size(), 36u);
+    EXPECT_THROW((void)g.coarsened(3), std::invalid_argument);
+    std::stop_source cancelled;
+    cancelled.request_stop();
+    EXPECT_THROW((void)g.coarsened(4, cancelled.get_token()), std::runtime_error);
 }
 
 TEST(CollisionAuthoring, CalibratedSceneScaleKeepsMetricPresetDimensions) {

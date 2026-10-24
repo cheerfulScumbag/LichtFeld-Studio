@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2026 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #include "core/collision_source.hpp"
+#include "core/mesh_data.hpp"
 #include <algorithm>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
@@ -94,5 +95,37 @@ namespace lfs::core {
         });
         check();
         return result;
+    }
+    std::shared_ptr<MeshData> makeCollisionMesh(CollisionMesh data, std::stop_token stop) {
+        if (data.vertices.empty() || data.indices.empty())
+            throw std::runtime_error("Collision generation produced an empty surface");
+        auto mesh = std::make_shared<MeshData>();
+        auto vertices = data.vertices.size() / 3, faces = data.indices.size() / 3;
+        mesh->vertices = Tensor::from_vector(data.vertices, {vertices, 3}, Device::CPU);
+        mesh->indices = Tensor::from_vector(data.indices, {faces, 3}, Device::CPU);
+        // A simple parallel-safe indexed normal pass avoids OpenMesh topology
+        // construction and its large adjacency/conversion allocations.
+        mesh->normals = Tensor::zeros({vertices, 3}, Device::CPU);
+        auto* normals = mesh->normals.ptr<float>();
+        for (size_t f = 0; f < data.indices.size(); f += 3) {
+            if ((f & 4095) == 0 && stop.stop_requested())
+                throw std::runtime_error("Collision surface cancelled");
+            const auto a = data.indices[f], b = data.indices[f + 1], c = data.indices[f + 2];
+            auto point = [&](int i) { return glm::vec3(data.vertices[i * 3], data.vertices[i * 3 + 1], data.vertices[i * 3 + 2]); };
+            auto n = glm::cross(point(b) - point(a), point(c) - point(a));
+            for (int i : {a, b, c})
+                for (int k = 0; k < 3; ++k)
+                    normals[i * 3 + k] += n[k];
+        }
+        for (size_t i = 0; i < vertices; ++i) {
+            if ((i & 4095) == 0 && stop.stop_requested())
+                throw std::runtime_error("Collision surface cancelled");
+            glm::vec3 n(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]);
+            if (auto length = glm::length(n); length > 0)
+                n /= length;
+            for (int k = 0; k < 3; ++k)
+                normals[i * 3 + k] = n[k];
+        }
+        return mesh;
     }
 } // namespace lfs::core

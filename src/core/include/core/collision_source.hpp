@@ -3,6 +3,7 @@
 #pragma once
 #include "core/collision.hpp"
 #include "core/tensor.hpp"
+#include <memory>
 
 namespace lfs::core {
     // Raw geometry in log-scale/logit-opacity domains, without SH or scene state.
@@ -15,4 +16,6 @@ namespace lfs::core {
     [[nodiscard]] LFS_CORE_API std::vector<CollisionGaussian> extractCollisionSource(
         std::span<const CollisionGeometry> sources, const glm::mat4& world_to_grid = glm::mat4(1),
         std::stop_token stop = {}, unsigned parallelism = 8);
+    struct MeshData;
+    [[nodiscard]] LFS_CORE_API std::shared_ptr<MeshData> makeCollisionMesh(CollisionMesh data, std::stop_token stop = {});
 } // namespace lfs::core

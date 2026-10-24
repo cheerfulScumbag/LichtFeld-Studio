@@ -165,8 +165,9 @@ TEST_F(CollisionExport, CancellationKeepsPriorFilesAndCleansTemporaryPayloads) {
     EXPECT_EQ(content, "old json");
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
 }
-TEST_F(CollisionExport, VoxelProgressIsMonotonic) {
+TEST_F(CollisionExport, ProgressIsMonotonicAndGlbCancellationPreservesPriorOutput) {
     const auto v = volume();
+    const auto surface = v.boundsMesh();
     float previous = 0;
     auto report = [&](float value, const auto& stage) {
         EXPECT_GE(value, previous);
@@ -176,6 +177,20 @@ TEST_F(CollisionExport, VoxelProgressIsMonotonic) {
     };
     io::exportCollisionVoxels(v, glm::mat4(1), dir / "scene.voxel.json", {}, report);
     EXPECT_FLOAT_EQ(previous, 1);
+    previous = 0;
+    io::exportCollisionGlb(surface.vertices, surface.indices, glm::mat4(1), dir / "scene.glb", {}, report);
+    EXPECT_FLOAT_EQ(previous, 1);
+    std::ofstream(dir / "scene.glb") << "prior surface";
+    std::stop_source stop;
+    EXPECT_THROW(io::exportCollisionGlb(surface.vertices, surface.indices, glm::mat4(1), dir / "scene.glb", stop.get_token(), [&](float value, auto) {
+                     if (value >= .5f)
+                         stop.request_stop();
+                 }),
+                 std::runtime_error);
+    std::string prior;
+    std::getline(std::ifstream(dir / "scene.glb"), prior);
+    EXPECT_EQ(prior, "prior surface");
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 3);
 }
 TEST_F(CollisionExport, OverwritePublishesBothFilesAndInvalidDestinationKeepsThePriorPair) {
     auto v = volume();
@@ -188,6 +203,36 @@ TEST_F(CollisionExport, OverwritePublishesBothFilesAndInvalidDestinationKeepsThe
     EXPECT_EQ(std::filesystem::file_size(dir / "scene.voxel.bin"), bytes);
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
 }
+TEST_F(CollisionExport, GlbCarriesBakedWorldCoordinatesAndCorrectWinding) {
+    core::CollisionMesh m{{0, 0, 0, 1, 0, 0, 0, 1, 0}, {0, 1, 2}};
+    auto transform = glm::translate(glm::mat4(1), glm::vec3(4, 5, 6));
+    transform = glm::rotate(transform, .4f, glm::vec3(0, 1, 0));
+    transform = glm::scale(transform, glm::vec3(-2, 3, 4));
+    io::exportCollisionGlb(m.vertices, m.indices, transform, dir / "scene.glb");
+    std::ifstream in(dir / "scene.glb", std::ios::binary);
+    EXPECT_EQ(readWord(in), 0x46546c67u);
+    EXPECT_EQ(readWord(in), 2u);
+    EXPECT_EQ(readWord(in), std::filesystem::file_size(dir / "scene.glb"));
+    const auto size = readWord(in);
+    EXPECT_EQ(readWord(in), 0x4e4f534au);
+    std::string json(size, ' ');
+    in.read(json.data(), size);
+    auto meta = nlohmann::json::parse(json);
+    EXPECT_EQ(meta["accessors"][0]["count"], 3);
+    EXPECT_EQ(readWord(in), 48u);
+    EXPECT_EQ(readWord(in), 0x004e4942u);
+    glm::mat4 pc(1);
+    pc[0][0] = pc[1][1] = -1;
+    for (int i = 0; i < 3; ++i) {
+        auto p = pc * transform * glm::vec4(m.vertices[i * 3], m.vertices[i * 3 + 1], m.vertices[i * 3 + 2], 1);
+        for (int k = 0; k < 3; ++k)
+            EXPECT_FLOAT_EQ(std::bit_cast<float>(readWord(in)), p[k]);
+    }
+    EXPECT_EQ(readWord(in), 0u);
+    EXPECT_EQ(readWord(in), 2u);
+    EXPECT_EQ(readWord(in), 1u);
+    EXPECT_THROW(io::exportCollisionGlb(m.vertices, std::array<int32_t, 3>{0, 1, 99}, transform, dir / "invalid.glb"), std::runtime_error);
+}
 
 TEST_F(CollisionExport, ValidLongFilenamesUseSharedTemporaryPathHandling) {
     const auto path = dir / (std::string(240, 's') + ".voxel.json");
@@ -198,5 +243,10 @@ TEST_F(CollisionExport, ValidLongFilenamesUseSharedTemporaryPathHandling) {
     EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
     EXPECT_TRUE(core::native_fs::is_regular_file(path));
     EXPECT_TRUE(core::native_fs::is_regular_file(binary));
-    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 2);
+    const auto surface = v.mesh(core::CollisionShape::Faces);
+    const auto glb = dir / (std::string(247, 's') + ".glb");
+    EXPECT_NO_THROW(io::exportCollisionGlb(surface.vertices, surface.indices, glm::mat4(1), glb));
+    EXPECT_NO_THROW(io::exportCollisionGlb(surface.vertices, surface.indices, glm::mat4(1), glb));
+    EXPECT_TRUE(core::native_fs::is_regular_file(glb));
+    EXPECT_EQ(std::distance(std::filesystem::directory_iterator(dir), std::filesystem::directory_iterator{}), 3);
 }
