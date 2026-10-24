@@ -47,7 +47,7 @@ namespace lfs::io {
                         word(out, values[k]);
             }
         }
-        std::ofstream output(const std::filesystem::path& path) {
+        auto output(const std::filesystem::path& path) {
             std::ofstream out;
             out.exceptions(std::ios::badbit | std::ios::failbit);
             out.open(core::native_fs::native_path(path), std::ios::binary | std::ios::trunc);
@@ -73,8 +73,7 @@ namespace lfs::io {
             for (const auto& [temp, target] : files) {
                 if (core::native_fs::exists(target) && !core::native_fs::is_regular_file(target))
                     throw std::runtime_error("Collision export destination is not a regular file: " + core::path_to_utf8(target));
-                auto backup = temp->path;
-                backup += ".backup";
+                auto backup = make_atomic_temp_output_path(target);
                 entries.push_back({temp, target, backup});
             }
             try {
@@ -170,7 +169,7 @@ namespace lfs::io {
             for (const auto& p : level) {
                 check(stop);
                 const auto value = small ? 2u : source[p.source];
-                if (value == 1) {
+                if (value == 1 && glm::all(glm::lessThanEqual(p.min + p.edge, v.dimensions))) {
                     nodes[p.dest] = 0xff000000u;
                     continue;
                 }
@@ -180,7 +179,7 @@ namespace lfs::io {
                         for (int y = 0; y < 4; ++y)
                             for (int x = 0; x < 4; ++x) {
                                 const glm::ivec3 cell(x, y, z);
-                                if (small ? v.occupied(p.min + cell) : core::collision_detail::lookupLeaf(source, cell, 4, p.source).solid) {
+                                if (v.contains(p.min + cell) && (small ? v.occupied(p.min + cell) : core::collision_detail::lookupLeaf(source, cell, 4, p.source).solid)) {
                                     auto q = remap(cell, 4);
                                     mask |= uint64_t(1) << (q.x + 4 * q.y + 16 * q.z);
                                 }
@@ -203,7 +202,7 @@ namespace lfs::io {
                     auto bits = glm::ivec3(oct & 1, (oct >> 1) & 1, oct >> 2);
                     auto q = remap(bits, 2);
                     const int dst = q.x + 2 * q.y + 4 * q.z;
-                    const auto child = small ? 0u : value - 2 + oct;
+                    const auto child = small || value <= 1 ? p.source : value - 2 + oct;
                     auto min = p.min + bits * (p.edge / 2);
                     bool present = !small && source[child] != 0;
                     if (small)
@@ -211,7 +210,7 @@ namespace lfs::io {
                             for (int y = 0; y < 4; ++y)
                                 for (int x = 0; x < 4; ++x)
                                     present |= v.occupied(min + glm::ivec3(x, y, z));
-                    if (present) {
+                    if (present && v.contains(min)) {
                         mask |= 1u << dst;
                         children[dst] = child;
                         minima[dst] = min;

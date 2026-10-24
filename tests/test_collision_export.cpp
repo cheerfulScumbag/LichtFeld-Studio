@@ -125,6 +125,23 @@ TEST_F(CollisionExport, TinySolidAndEmptyVolumesAreValid) {
     v.tree = {0};
     roundtrip(v, glm::mat4(1));
 }
+TEST_F(CollisionExport, UniformSolidRegionsClipLogicalBounds) {
+    for (const auto dimensions : {glm::ivec3(5), glm::ivec3(9, 6, 13)}) {
+        auto v = volume(dimensions);
+        v.tree = {1};
+        roundtrip(v, glm::mat4(1));
+        roundtrip(v, glm::scale(glm::mat4(1), glm::vec3(-2, 2, 2)));
+    }
+}
+TEST_F(CollisionExport, OverwriteHandlesNearLimitTemporaryFilenames) {
+    const auto v = volume({4, 4, 4});
+    for (size_t length = 200; length <= 255; ++length) {
+        SCOPED_TRACE(length);
+        const auto path = dir / (std::string(length - 11, 's') + ".voxel.json");
+        ASSERT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+        EXPECT_NO_THROW(io::exportCollisionVoxels(v, glm::mat4(1), path));
+    }
+}
 TEST_F(CollisionExport, NonrepresentableVoxelTransformsFailWithoutWriting) {
     auto v = volume();
     EXPECT_THROW(io::exportCollisionVoxels(v, glm::rotate(glm::mat4(1), .2f, glm::vec3(0, 1, 0)), dir / "scene.voxel.json"), std::runtime_error);
