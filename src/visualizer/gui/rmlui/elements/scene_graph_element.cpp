@@ -3118,6 +3118,10 @@ namespace lfs::vis::gui {
             items.push_back(makeAction(tr("export.export") + "...",
                                        prefixedAction(std::format("export_splat:{}", node_id)), !items.empty()));
         }
+        if (node->collision || (node->type == core::NodeType::MESH && node->mesh)) {
+            items.push_back(makeAction(tr("export.export") + "...",
+                                       prefixedAction(std::format("export_collision:{}", node_id)), !items.empty()));
+        }
         if (selected_ids_.size() > 1) {
             items.push_back(makeAction(tr("scene.select_hierarchy"),
                                        prefixedAction("select_hierarchy")));
@@ -3552,6 +3556,16 @@ namespace lfs::vis::gui {
                 }
             };
             gui->enqueueModal(std::move(request));
+        } else if (kind == "export_collision" && parts.size() >= 2) {
+            core::NodeId id = core::NULL_NODE;
+            if (!parseNodeId(parts[1], id))
+                return;
+            const auto* node = scene->getNodeById(id);
+            if (!node || (!node->collision && !node->mesh))
+                return;
+            scene_manager->selectNode(id);
+            requestCollisionExport(node->uuid);
+            PanelRegistry::instance().set_panel_enabled("native.collision_export", true);
         } else if (kind == "export_splat" && parts.size() >= 2) {
             core::NodeId id = core::NULL_NODE;
             if (!parseNodeId(parts[1], id))

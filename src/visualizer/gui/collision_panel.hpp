@@ -28,6 +28,7 @@ namespace lfs::vis::gui {
         void ProcessEvent(Rml::Event& event) override;
         bool prepare(const PanelDrawContext& ctx);
         void start(bool new_node);
+        void buildSurface();
         void syncGenerationControls();
         void resetSurfaceSettings();
         void adoptResult();
@@ -80,6 +81,7 @@ namespace lfs::vis::gui {
             uint64_t scene_generation = 0;
             uint64_t graph_epoch = 0;
             core::CollisionDisplay display;
+            bool surface_only = false;
         };
         std::optional<Result> result_;
     };

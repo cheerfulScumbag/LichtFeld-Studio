@@ -22,7 +22,7 @@ namespace lfs::vis::gui {
                     "Enable Auto resolution or choose larger cells in Custom. Try Surface cleanup for reconstruction outliers. Large outlier splats can create enormous collision regions. The exact limit and the failed step are below."};
         if (lower.find("out of memory") != std::string::npos || lower.find("bad_alloc") != std::string::npos)
             return {"Not enough memory for this collision operation",
-                    "Try larger cells or fewer visible source splats. Free GPU memory if the details name CUDA."};
+                    "Try larger cells, a coarser optional triangle surface, or fewer visible source splats. Free GPU memory if the details name CUDA."};
         if (lower.find("excluded all") != std::string::npos)
             return {"All source splats were filtered out", "Increase Maximum splat area or choose Keep all splats, then generate again. The original splats and existing collider are unchanged."};
         if (lower.find("no occupied") != std::string::npos || lower.find("retained no") != std::string::npos)

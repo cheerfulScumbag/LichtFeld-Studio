@@ -51,8 +51,8 @@ namespace {
         g->solid.clear();
         return g;
     }
-    std::shared_ptr<MeshData> mesh(const CollisionVolume& v) {
-        auto surface = v.boundsMesh();
+    std::shared_ptr<MeshData> mesh(const CollisionVolume& v, bool extracted = true) {
+        auto surface = extracted ? v.mesh(CollisionShape::Faces) : v.boundsMesh();
         auto result = std::make_shared<MeshData>();
         result->vertices = Tensor::from_vector(surface.vertices, {surface.vertices.size() / 3, 3}, Device::CPU);
         result->indices = Tensor::from_vector(surface.indices, {surface.indices.size() / 3, 3}, Device::CPU);
@@ -97,7 +97,7 @@ TEST_P(CollisionArchive, RestoresGeometryAndVolumeWithDeferredHydration) {
     auto boxes = std::make_shared<CollisionVolume>(*volume());
     boxes->show_voxels = true;
     std::shared_ptr<const CollisionVolume> g = boxes;
-    auto geometry = mesh(*g);
+    auto geometry = mesh(*g, GetParam());
     const auto group = scene.addGroup("collision group");
     auto id = scene.addMesh("Collision", geometry, group);
     auto* node = scene.getNodeById(id);
@@ -186,7 +186,7 @@ TEST_P(CollisionArchive, RestoresGeometryAndVolumeWithDeferredHydration) {
     EXPECT_EQ(draws[0].collision_volume->gpuOccupancy(), g->gpuOccupancy());
     EXPECT_EQ(draws[0].model, world);
 }
-INSTANTIATE_TEST_SUITE_P(CollisionScene, CollisionArchive, testing::Values(false), [](const auto& info) {
+INSTANTIATE_TEST_SUITE_P(CollisionScene, CollisionArchive, testing::Bool(), [](const auto& info) {
     return info.param ? "OptionalSurface" : "DefaultBoxes";
 });
 TEST(CollisionScene, DuplicateAndDeleteUndoPreserveCollisionPayload) {

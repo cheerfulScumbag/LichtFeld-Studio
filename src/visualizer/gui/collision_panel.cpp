@@ -28,11 +28,8 @@
 
 namespace lfs::vis::gui {
     namespace {
-        std::shared_ptr<core::MeshData> makeMesh(core::CollisionMesh data) {
-            auto mesh = std::make_shared<core::MeshData>();
-            mesh->vertices = core::Tensor::from_vector(data.vertices, {data.vertices.size() / 3, 3}, core::Device::CPU);
-            mesh->indices = core::Tensor::from_vector(data.indices, {data.indices.size() / 3, 3}, core::Device::CPU);
-            mesh->compute_normals();
+        std::shared_ptr<core::MeshData> makeMesh(core::CollisionMesh data, std::stop_token stop = {}) {
+            auto mesh = core::makeCollisionMesh(std::move(data), stop);
             // Uniform collision color belongs to one material, not V copies.
             core::Material material;
             material.base_color = {0.1f, 0.65f, 0.8f, 1.0f};
@@ -303,6 +300,8 @@ namespace lfs::vis::gui {
                 el->RemoveAttribute("checked");
         };
         setValue("units-per-meter", std::format("{:.6g}", settings_.units_per_meter));
+        setValue("surface-stride", std::to_string(display_.surface_stride));
+        setValue("shape", std::to_string(int(display_.surface_ready ? display_.surface_shape : settings_.shape)));
         setValue("filter-mode", settings_.adaptive_filter ? (settings_.cluster ? "2" : "1") : (settings_.cluster ? "3" : "0"));
         check("auto-resolution", settings_.auto_resolution);
         set("cluster-resolution", settings_.cluster_resolution);
@@ -346,6 +345,7 @@ namespace lfs::vis::gui {
         s.floor_below_seed = checked("floor-below-seed");
         s.carve_height = number("carve-height");
         s.carve_radius = number("carve-radius");
+        s.shape = value("shape") == "1" ? core::CollisionShape::Faces : core::CollisionShape::Smooth;
         s.seed = {number("seed-x"), number("seed-y"), number("seed-z")};
         s.validate();
         return s;
@@ -558,6 +558,33 @@ namespace lfs::vis::gui {
             result_.reset();
             return;
         }
+        if (result_->surface_only) {
+            if (!node || node->locked.get()) {
+                finishJob("discarded");
+                status("Surface result discarded: source collision is missing or locked");
+                result_.reset();
+                return;
+            }
+            const auto parent_id = node->parent_id;
+            const auto id = scene_->addMesh(node->name + " surface", result_->mesh, parent_id);
+            auto* surface = scene_->getNodeById(id);
+            if (!surface)
+                throw std::runtime_error("Could not create collision surface node");
+            const auto parent = parent_id == core::NULL_NODE ? glm::mat4(1) : scene_->getWorldTransform(parent_id);
+            surface->local_transform = glm::inverse(parent) * result_->world_transform;
+            surface->collision = result_->volume;
+            surface->collision_display = result_->display;
+            scene_->markTransformDirty(id);
+            scene_->markPayloadDiverged(id);
+            node->collision_display.surface_stride = result_->display.surface_stride;
+            node->collision_display.surface_shape = result_->display.surface_shape;
+            scene_->notifyMutation(core::Scene::MutationType::MODEL_CHANGED);
+            if (auto* manager = services().sceneOrNull())
+                manager->selectNode(id);
+            finishJob("completed");
+            result_.reset();
+            return;
+        }
         const auto centroid = result_->mesh->vertices.mean({0}, false).to_vector();
         if (!node) {
             auto id = scene_->addMesh("Collision", result_->mesh);
@@ -610,6 +637,60 @@ namespace lfs::vis::gui {
         document_->SetClass("collision-cleanup", filter == "1" || filter == "2");
         document_->SetClass("collision-seeded", filter == "2" || filter == "3");
         host_.markContentDirty();
+    }
+    void CollisionPanel::buildSurface() {
+        if (busy_)
+            throw std::runtime_error("Wait for generation to finish");
+        auto* node = scene_->getNodeByUuid(target_);
+        if (!node || !node->collision || node->locked.get())
+            throw std::runtime_error("Select an unlocked collision node");
+        auto volume = node->collision;
+        clearError();
+        const auto shape = readInputs().shape;
+        auto display = node->collision_display;
+        display.preview = false;
+        display.surface_ready = true;
+        display.surface_shape = shape;
+        display.surface_stride = std::stoi(value("surface-stride"));
+        auto transform = scene_->getWorldTransform(node->id);
+        const auto generation = scene_->renderGeneration(), epoch = scene_->graphEpoch();
+        const auto target = node->uuid;
+        {
+            std::lock_guard lock(mutex_);
+            error_.clear();
+            progress_ = "Building optional surface (Walk uses full-resolution voxels)";
+        }
+        busy_ = true;
+        document_->GetElementById("collision-scroll")->SetScrollTop(0);
+        done_ = false;
+        job_started_ = std::chrono::steady_clock::now();
+        next_progress_ui_ = {};
+        job_outcome_ = "running";
+        job_graph_epoch_ = scene_->graphEpoch();
+        job_title_ = LOC("collision.building_surface");
+        job_context_ = std::format("Surface resolution {}×; source collision cell {:.4g} scene units.", display.surface_stride, volume->settings.voxel_size);
+        progress_value_ = 0;
+        worker_ = std::jthread([this, volume, display, shape, transform, generation, epoch, target](std::stop_token stop) {
+            try {
+                auto report = [&](float value, std::string text) {
+                    std::lock_guard lock(mutex_);
+                    progress_ = std::move(text);
+                    progress_value_ = std::max(progress_value_, std::clamp(value, 0.f, 1.f));
+                };
+                report(0, "Preparing surface resolution");
+                auto surface_progress = core::collisionProgressRange(report, .05f, .85f);
+                auto surface = display.surface_stride == 1 ? volume->mesh(shape, stop, surface_progress) : volume->coarsened(display.surface_stride, stop).mesh(shape, stop, surface_progress);
+                report(.85f, "Computing surface normals");
+                auto mesh = makeMesh(std::move(surface), stop);
+                std::lock_guard lock(mutex_);
+                result_ = Result{volume, mesh, transform, {}, target, generation, epoch, display, true};
+            } catch (const std::exception& error) {
+                std::lock_guard lock(mutex_);
+                error_ = error.what();
+            }
+            done_.store(true, std::memory_order_release);
+            python::request_redraw();
+        });
     }
     void CollisionPanel::ProcessEvent(Rml::Event& event) {
         if (updating_)
@@ -669,6 +750,22 @@ namespace lfs::vis::gui {
                     setValue("seed-x", std::format("{:.6g}", p.x));
                     setValue("seed-y", std::format("{:.6g}", p.y));
                     setValue("seed-z", std::format("{:.6g}", p.z));
+                }
+            } else if (id == "show-voxels" || id == "show-mesh") {
+                if (busy_)
+                    throw std::runtime_error("Wait for generation before changing visualization");
+                auto* node = scene_->getNodeByUuid(target_);
+                if (!node || !node->collision)
+                    throw std::runtime_error("Select a collision node first");
+                if (node->locked.get())
+                    throw std::runtime_error("Collision target is locked");
+                if (id == "show-mesh") {
+                    buildSurface();
+                } else {
+                    node->collision_display.preview = id == "show-voxels";
+                    display_ = node->collision_display;
+                    scene_->notifyMutation(core::Scene::MutationType::DISPLAY_CHANGED);
+                    loadSettings(*node);
                 }
             }
         } catch (const std::exception& error) {

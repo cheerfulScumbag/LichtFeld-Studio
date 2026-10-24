@@ -71,7 +71,7 @@ otherwise nearby support population breaks ties with isolated floaters. Strict
 mode instead floods six-connected coarse occupied cells, retains splats centred
 inside, and tests contribution/overlap for the others.
 
-## Preview
+## Preview and triangle surfaces
 
 The preview ray-marches sparse occupancy to the first surface. It uses translucent,
 axis-shaded gray faces and dark screen-space edges; selected nodes tint blue, and
@@ -79,6 +79,13 @@ inside-solid exits tint orange. Hidden edges do not accumulate. It overlays spla
 without recoloring them or testing splat depth, following the
 [SuperSplat viewer overlay](https://github.com/playcanvas/supersplat-viewer/blob/ece8201c6a0dbea2dcccc418ec63c4217c7b2956/src/voxel-debug-overlay.ts).
 Intersecting independent overlays remain draw-order dependent.
+
+**Advanced > Triangle surface > Build surface node** creates a separate mesh with
+its own visibility and transform. Smooth uses marching cubes with coplanar
+simplification; Faces follows exposed voxel faces. The default `4×` cell multiplier
+conservatively coarsens only the surface and may close fine gaps; `1×` retains exact
+voxel detail and can produce very large meshes. Both node types retain the original
+occupancy for Walk, even after the voxel source node is deleted.
 
 ## Walk
 
@@ -97,8 +104,27 @@ appear less conservative than the actual collision.
 
 ## Saving and exporting
 
-Saving `.licht` embeds occupancy, settings, display controls and transforms,
-including deferred hydration. No sidecar is needed to reopen it.
+Saving `.licht` embeds occupancy, settings, display controls, transforms and any
+built surface, including deferred hydration. No sidecar is needed to reopen it.
+
+Right-click a collider and choose **Export…**, or use **File > Export > Collision…**.
+Select a node when several colliders exist. Exports run asynchronously with
+progress, cancellation and errors:
+
+- **Export for SuperSplat** writes a version 1.1 `.voxel.json` / `.voxel.bin` pair.
+  Upload both under **SuperSplat Studio > Assets > Collision > Upload**.
+- **Export surface (.glb)** uses an existing surface or builds one at the node's
+  saved detail/shape. It does not replace the node or change Walk occupancy.
+
+Both bake the complete node world transform and PlayCanvas PLY import rotation
+(`Rz(180°)`). Export splats with matching transforms. Units are preserved; calibrate
+metric scale for walking. GLB supports affine transforms and reflected winding.
+The voxel format supports exact axis permutations/reflections, uniform scale and
+translation. Other transforms fail explicitly rather than silently resampling;
+align/regenerate or use GLB. Its 24-bit indices are checked before publication.
+Replacing exports requires confirmation; failed/cancelled writes clean temporary
+files and restore previous companions. SuperSplat treats space outside its grid as
+solid; LFS Walk retains its own out-of-grid behavior.
 
 ## Implementation and limits
 
@@ -114,8 +140,9 @@ Archives write version-3 compressed preorder topology and retain readers for den
 RLE/version-2 sparse projects. GPU traversal skips uniform regions and uses packed
 leaf masks. Explicit budgets preserve cancellation and actionable failures:
 32M source Gaussians, 512,000,001 CPU tree words, 64M compressed CUDA output records,
-8M floor columns, 32,000,001 floor-height nodes, and 2²¹ cells per axis. GPU buffers must fit device limits. Snapshot/allocator/
-occupancy allocations add peak memory; the legacy dense reader is limited to 16M cells.
+8M floor columns, 32,000,001 floor-height nodes, 64M surface vertices, 384M indices,
+and 2²¹ cells per axis. GPU buffers must fit device limits. Snapshot/allocator/
+surface allocations add peak memory; the legacy dense reader is limited to 16M cells.
 
 ### Measured performance
 
