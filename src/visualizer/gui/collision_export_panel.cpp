@@ -3,6 +3,7 @@
 #include "gui/collision_export_panel.hpp"
 #include "core/event_bridge/localization_manager.hpp"
 #include "core/logger.hpp"
+#include "core/native_fs.hpp"
 #include "core/path_utils.hpp"
 #include "core/services.hpp"
 #include "gui/collision_job_status.hpp"
@@ -114,13 +115,13 @@ namespace lfs::vis::gui {
         auto path = voxels ? SaveJsonFileDialog("scene.voxel.json") : SaveGlbFileDialog("scene.collision.glb");
         if (path.empty())
             return;
-        if (voxels && !path.filename().string().ends_with(".voxel.json")) {
+        if (voxels && !core::path_to_utf8(path.filename()).ends_with(".voxel.json")) {
             path.replace_extension();
             path += ".voxel.json";
         }
         auto bin = path;
         bin.replace_extension(".bin");
-        if (std::filesystem::exists(path) || (voxels && std::filesystem::exists(bin))) {
+        if (core::native_fs::exists(path) || (voxels && core::native_fs::exists(bin))) {
             core::ModalRequest request;
             request.title = LOC("collision.export_section");
             request.style = core::ModalStyle::Warning;
