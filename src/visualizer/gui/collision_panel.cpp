@@ -301,7 +301,7 @@ namespace lfs::vis::gui {
         };
         setValue("units-per-meter", std::format("{:.6g}", settings_.units_per_meter));
         setValue("surface-stride", std::to_string(display_.surface_stride));
-        setValue("shape", std::to_string(int(display_.surface_ready ? display_.surface_shape : settings_.shape)));
+        setValue("shape", std::to_string(int(display_.surface_shape)));
         setValue("filter-mode", settings_.adaptive_filter ? (settings_.cluster ? "2" : "1") : (settings_.cluster ? "3" : "0"));
         check("auto-resolution", settings_.auto_resolution);
         set("cluster-resolution", settings_.cluster_resolution);
@@ -462,6 +462,7 @@ namespace lfs::vis::gui {
         auto display = display_;
         display.preview = true;
         display.surface_ready = false;
+        display.surface_shape = settings_.shape;
         if (!target.is_nil())
             if (auto* node = scene_->getNodeByUuid(target); !node || node->locked.get())
                 throw std::runtime_error("Collision target is missing or locked");

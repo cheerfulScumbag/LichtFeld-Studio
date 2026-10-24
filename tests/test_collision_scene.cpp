@@ -4,21 +4,52 @@
 #include "core/collision.hpp"
 #include "core/event_bridge/event_bridge.hpp"
 #include "core/events.hpp"
+#include "core/native_fs.hpp"
 #include "core/scene.hpp"
 #include "core/services.hpp"
+#include "gui/collision_export_panel.hpp"
+#include "gui/collision_panel.hpp"
+#include "gui/rmlui/rmlui_manager.hpp"
 #include "input/input_bindings.hpp"
 #include "input/input_controller.hpp"
 #include "input/input_router.hpp"
 #include "input/key_codes.hpp"
+#include "io/collision_export.hpp"
 #include "io/project_document.hpp"
 #include "io/scene_chapter_adapter.hpp"
 #include "operation/undo_entry.hpp"
+#include "operation/undo_history.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "rendering/viewport_request_builder.hpp"
 #include "scene/scene_manager.hpp"
+#include "visualizer/gui_capabilities.hpp"
+#include <RmlUi/Core.h>
+#include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <filesystem>
+#include <fstream>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
+
+namespace lfs::vis::gui {
+    class CollisionPanelTestAccess {
+    public:
+        static void restore(CollisionPanel& panel, core::Scene& scene, Rml::ElementDocument* doc, const core::SceneNode& node) {
+            panel.scene_ = &scene;
+            panel.document_ = doc;
+            panel.loadSettings(node);
+        }
+        static void exportMesh(CollisionExportPanel& panel, core::Scene& scene, Rml::ElementDocument* doc, core::Uuid target, const std::filesystem::path& path) {
+            panel.scene_ = &scene;
+            panel.document_ = doc;
+            panel.target_ = target;
+            panel.startExport(false, path);
+        }
+        static std::string wait(CollisionExportPanel& panel) {
+            panel.worker_.join();
+            return panel.error_;
+        }
+    };
+} // namespace lfs::vis::gui
 
 TEST(CollisionJobStatus, FailuresGiveRecoveryAdviceAndDistinguishCancellation) {
     using lfs::vis::gui::collisionFailureInfo;
@@ -77,6 +108,97 @@ namespace {
     };
 } // namespace
 
+namespace {
+    class CollisionPanelRenderer final : public Rml::RenderInterface {
+        Rml::CompiledGeometryHandle CompileGeometry(Rml::Span<const Rml::Vertex>, Rml::Span<const int>) override { return 1; }
+        void RenderGeometry(Rml::CompiledGeometryHandle, Rml::Vector2f, Rml::TextureHandle) override {}
+        void ReleaseGeometry(Rml::CompiledGeometryHandle) override {}
+        Rml::TextureHandle LoadTexture(Rml::Vector2i&, const Rml::String&) override { return 0; }
+        Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte>, Rml::Vector2i) override { return 0; }
+        void ReleaseTexture(Rml::TextureHandle) override {}
+        void EnableScissorRegion(bool) override {}
+        void SetScissorRegion(Rml::Rectanglei) override {}
+    };
+    class CollisionPanels : public testing::Test {
+    protected:
+        CollisionPanelRenderer renderer;
+        lfs::vis::gui::RmlUIManager rml;
+        Rml::Context* context = nullptr;
+        void SetUp() override {
+            ASSERT_TRUE(Rml::Initialise());
+            ASSERT_TRUE(Rml::LoadFontFace((std::filesystem::path(PROJECT_ROOT_PATH) / "src/visualizer/gui/assets/fonts/Inter-Regular.ttf").generic_string()));
+            context = Rml::CreateContext("collision-panels-test", {600, 900}, &renderer);
+            ASSERT_NE(context, nullptr);
+        }
+        void TearDown() override {
+            lfs::vis::op::undoHistory().clear();
+            Rml::RemoveContext("collision-panels-test");
+            Rml::Shutdown();
+        }
+        Rml::ElementDocument* document(const char* name) {
+            const auto path = std::filesystem::path(PROJECT_ROOT_PATH) / "src/visualizer/gui/rmlui/resources" / name;
+            return context->LoadDocument(Rml::StringUtilities::Replace(path.generic_string(), ':', '|'));
+        }
+    };
+} // namespace
+
+TEST_F(CollisionPanels, ReselectingVoxelSourceRestoresTheSurfaceExportShape) {
+    using namespace lfs::vis::gui;
+    Scene scene;
+    const auto g = volume();
+    const auto id = scene.addMesh("Collision", mesh(*g, false));
+    auto* node = scene.getNodeById(id);
+    node->collision = g;
+    node->collision_display.surface_ready = false;
+    node->collision_display.surface_shape = CollisionShape::Faces;
+    ASSERT_EQ(g->settings.shape, CollisionShape::Smooth);
+    auto* doc = document("collision.rml");
+    ASSERT_NE(doc, nullptr);
+    CollisionPanel panel(&rml);
+    for (auto shape : {CollisionShape::Faces, CollisionShape::Smooth, CollisionShape::Faces}) {
+        node->collision_display.surface_shape = shape;
+        CollisionPanelTestAccess::restore(panel, scene, doc, *node);
+        EXPECT_EQ(dynamic_cast<Rml::ElementFormControl*>(doc->GetElementById("shape"))->GetValue(), std::to_string(int(shape)));
+    }
+}
+
+TEST_F(CollisionPanels, ExportKeepsGeometryAndTransformWhenTheLiveMeshIsEditedAndBaked) {
+    using namespace lfs::vis::gui;
+    lfs::vis::SceneManager manager;
+    auto& scene = manager.getScene();
+    auto surface = volume()->boundsMesh();
+    // Leave enough data for the export worker and viewer edits to overlap.
+    surface.vertices.resize(300'000, .25f);
+    auto geometry = std::make_shared<MeshData>(
+        Tensor::from_vector(surface.vertices, {surface.vertices.size() / 3, 3}, Device::CPU),
+        Tensor::from_vector(surface.indices, {surface.indices.size() / 3, 3}, Device::CPU));
+    const auto id = scene.addMesh("Export surface", geometry);
+    const auto transform = glm::translate(glm::mat4(1), glm::vec3(3, 4, 5));
+    scene.setNodeTransform(id, transform);
+    const auto dir = std::filesystem::temp_directory_path() / ("collision-export-snapshot-" + generate_uuid_v4().to_string());
+    native_fs::create_directories(dir);
+    struct Cleanup {
+        std::filesystem::path dir;
+        ~Cleanup() { native_fs::remove_all(dir); }
+    } cleanup{dir};
+    lfs::io::exportCollisionGlb(surface.vertices, surface.indices, transform, dir / "expected.glb");
+    auto* doc = document("collision_export.rml");
+    ASSERT_NE(doc, nullptr);
+    CollisionExportPanel panel(&rml);
+    CollisionPanelTestAccess::exportMesh(panel, scene, doc, scene.getNodeUuid(id), dir / "actual.glb");
+    // Simulate an in-place edit as well as Bake Transform replacing the tensor.
+    std::fill_n(geometry->vertices.ptr<float>(), geometry->vertices.numel(), -100.f);
+    const auto baked = lfs::vis::cap::bakeNodeTransforms(manager, {"Export surface"});
+    ASSERT_TRUE(baked) << baked.error();
+    EXPECT_EQ(scene.getWorldTransform(id), glm::mat4(1));
+    EXPECT_TRUE(CollisionPanelTestAccess::wait(panel).empty());
+    auto read = [](const auto& path) {
+        std::ifstream file(native_fs::native_path(path), std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file), {});
+    };
+    EXPECT_TRUE(read(dir / "actual.glb") == read(dir / "expected.glb")) << "Export changed after the live mesh was edited and baked";
+}
+
 TEST_F(CollisionWalkController, CameraSeedsUseDataWorldForBothNavigationAxes) {
     Viewport viewport;
     viewport.camera.t = {2, 3, 5};
@@ -103,7 +225,7 @@ TEST_P(CollisionArchive, RestoresGeometryAndVolumeWithDeferredHydration) {
     auto* node = scene.getNodeById(id);
     const auto uuid = node->uuid;
     node->collision = g;
-    node->collision_display = {.preview = !GetParam(), .sharp = false, .surface_ready = GetParam(), .opacity = 0.45f, .slice = 0.8f, .surface_stride = 8};
+    node->collision_display = {.preview = !GetParam(), .sharp = false, .surface_ready = GetParam(), .opacity = 0.45f, .slice = 0.8f, .surface_stride = 8, .surface_shape = CollisionShape::Faces};
     const auto display = node->collision_display;
     node->payload_diverged = true;
     node->visible = false;

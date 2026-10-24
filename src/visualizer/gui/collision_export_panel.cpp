@@ -153,7 +153,11 @@ namespace lfs::vis::gui {
         if (!node || (voxels ? !node->collision : !node->collision && !node->mesh))
             throw std::runtime_error("Collision node no longer exists");
         const auto volume = node->collision;
-        const auto mesh = !node->collision || node->collision_display.surface_ready ? node->mesh : nullptr;
+        const auto mesh = !voxels && (!node->collision || node->collision_display.surface_ready) ? node->mesh : nullptr;
+        // Snapshot geometry and transform together on the viewer thread. Bake
+        // Transform and in-place edits must not change an in-flight export.
+        const auto vertices = mesh ? mesh->vertices.clone() : core::Tensor{};
+        const auto indices = mesh ? mesh->indices.clone() : core::Tensor{};
         const auto transform = scene_->getWorldTransform(node->id);
         const auto stride = node->collision_display.surface_stride;
         const auto shape = node->collision_display.surface_shape;
@@ -171,7 +175,7 @@ namespace lfs::vis::gui {
         text("export-status", LOC("collision.exporting"));
         document_->GetElementById("export-error")->SetProperty("display", "none");
         document_->GetElementById("export-job")->SetProperty("display", "block");
-        worker_ = std::jthread([this, voxels, path, volume, mesh, transform, stride, shape](std::stop_token stop) {
+        worker_ = std::jthread([this, voxels, path, volume, vertices, indices, transform, stride, shape](std::stop_token stop) {
             try {
                 auto report = [&](float value, std::string message) {
                     std::lock_guard lock(mutex_);
@@ -180,10 +184,10 @@ namespace lfs::vis::gui {
                 };
                 if (voxels)
                     io::exportCollisionVoxels(*volume, transform, path, stop, report);
-                else if (mesh) {
-                    const auto vertices = mesh->vertices.to(core::Device::CPU).contiguous();
-                    const auto indices = mesh->indices.to(core::Device::CPU).contiguous();
-                    io::exportCollisionGlb({vertices.ptr<float>(), vertices.numel()}, {indices.ptr<int32_t>(), indices.numel()}, transform, path, stop, report);
+                else if (vertices.is_valid()) {
+                    const auto cpu_vertices = vertices.device() == core::Device::CPU ? vertices.contiguous() : vertices.to(core::Device::CPU).contiguous();
+                    const auto cpu_indices = indices.device() == core::Device::CPU ? indices.contiguous() : indices.to(core::Device::CPU).contiguous();
+                    io::exportCollisionGlb({cpu_vertices.ptr<float>(), cpu_vertices.numel()}, {cpu_indices.ptr<int32_t>(), cpu_indices.numel()}, transform, path, stop, report);
                 } else {
                     report(0, "Building export surface at " + std::to_string(stride) + "x cell size");
                     auto surface_progress = core::collisionProgressRange(report, 0, .6f);

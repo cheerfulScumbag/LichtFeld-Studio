@@ -12,7 +12,7 @@
 #include <thread>
 
 namespace lfs::vis::gui {
-    class CollisionPanel final : public IPanel, private Rml::EventListener {
+    class LFS_VIS_API CollisionPanel final : public IPanel, private Rml::EventListener {
     public:
         explicit CollisionPanel(RmlUIManager* manager);
         ~CollisionPanel() override;
@@ -25,6 +25,7 @@ namespace lfs::vis::gui {
         void releaseRendererResources() override { host_.releaseRendererResources(); }
 
     private:
+        friend class CollisionPanelTestAccess;
         void ProcessEvent(Rml::Event& event) override;
         bool prepare(const PanelDrawContext& ctx);
         void start(bool new_node);
