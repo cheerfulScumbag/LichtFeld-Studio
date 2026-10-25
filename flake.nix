@@ -141,14 +141,38 @@
                                         os.symlink(os.readlink(library), destination)
                                     elif library.is_file():
                                         shutil.copy2(library, destination)
+                        # The GUI discovers its Python home through this production
+                        # layout. Use this build's interpreter and stdlib, not a
+                        # compiled-in prefix retained in a vcpkg binary cache.
+                        python_prefix = build / "vcpkg_installed/x64-linux"
+                        python_stdlib = python_prefix / "lib/python3.12"
+                        python_executable = python_prefix / "tools/python3/python3.12"
+                        if not (python_stdlib / "encodings/__init__.py").is_file() or not python_executable.is_file():
+                            raise FileNotFoundError("The vcpkg Python 3.12 runtime is incomplete")
+                        (payload / "bin").mkdir(parents=True, exist_ok=True)
+                        for destination, target in [
+                            (payload / "lib/python3.12", python_stdlib),
+                            (payload / "bin/python3", python_executable),
+                        ]:
+                            if destination.is_symlink():
+                                destination.unlink()
+                            if not destination.exists():
+                                destination.symlink_to(os.path.relpath(target, destination.parent),
+                                                       target_is_directory=target.is_dir())
                         run("cmake", "--install", build, "--prefix", payload)
                         check_env = os.environ.copy()
                         check_env["LD_LIBRARY_PATH"] = library_path(payload)
+                        check_env["PYTHONHOME"] = str(payload)
+                        check_env["PYTHONDONTWRITEBYTECODE"] = "1"
                         run(payload / "bin/LichtFeld-Studio", "--version", env=check_env)
-                        run("python3", "-c",
-                            f"import sys; sys.path.insert(0, '{payload / 'lib/python'}'); import lichtfeld",
-                            env=check_env)
-                        ready.write_text("Build and install completed successfully.\n")
+                        run(payload / "bin/python3", "-s", "-c",
+                            "import sys, importlib.machinery; sys.path.insert(0, sys.argv[1]); "
+                            "import encodings, ssl, lichtfeld\n"
+                            "if not isinstance(lichtfeld.__loader__, importlib.machinery.ExtensionFileLoader):\n"
+                            "    raise RuntimeError('lichtfeld must load its native extension, not a namespace package')\n"
+                            "import lfs_plugins; print('Python runtime, native binding, and plugin imports passed')",
+                            payload / "lib/python", env=check_env)
+                        ready.write_text("Build, install, and matching Python runtime validation completed successfully.\n")
                         notify("LichtFeld Studio", "Build complete. Starting application.")
                     except (OSError, subprocess.CalledProcessError) as error:
                         error_msg = f"Build failed: {error}. See {cache / 'build.log'}"

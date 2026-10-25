@@ -97,6 +97,10 @@ installed resources, and build caches live under
 `${XDG_CACHE_HOME:-$HOME/.cache}/lichtfeld-studio/`. Build output is recorded in
 `build.log` there. A failed build stops without marking the installation ready.
 Subsequent launches reuse the completed installation without recompiling.
+The installed Python layout references that build's Python 3.12 interpreter and
+standard library. Before marking a build ready, the launcher uses the matching
+interpreter to check codecs, SSL, the native `lichtfeld` extension, and the
+plugin package. It rejects a namespace-only import from the type-stub directory.
 
 Each source version gets a separate cache directory. Compilation uses up to
 six jobs and PTX for GPUs with compute capability 7.5 or newer. The driver may
