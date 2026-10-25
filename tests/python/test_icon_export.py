@@ -25,7 +25,8 @@ def _exporter():
 def test_every_scene_sprite_cell_has_an_icon_to_build_from():
     exporter = _exporter()
     cells = exporter.sprite_cells()
-    assert len(cells) == 17
+    assert len(cells) == 18
+    assert "collision" in {name for name, *_ in cells}
     for name, _x, _y, size in cells:
         assert size == 24
         assert (exporter.ICON_ROOT / "scene" / f"{name}.png").exists() or (
