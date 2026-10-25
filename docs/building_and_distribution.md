@@ -71,6 +71,11 @@ host's NVIDIA driver and graphics support through NixOS, then confirm that
 7.5 or newer are required. The launcher uses `/run/opengl-driver/lib`; it does
 not bundle or install a kernel driver. Bubblewrap must be allowed to create
 user namespaces. The flake enables unfree packages for the NVIDIA CUDA Toolkit.
+Before starting the source build, setup checks the host CUDA driver, requires
+CUDA 12.8 support, and verifies that the first visible GPU has compute capability
+7.5 or newer. On a multi-GPU system, use `CUDA_VISIBLE_DEVICES` to select a
+supported GPU. This check happens before fetching vcpkg or compiling dependencies;
+it cannot avoid the initial Nix download of the launcher and CUDA toolchain.
 
 From the repository root:
 
@@ -109,8 +114,14 @@ directly, without a terminal. If no default terminal is available, launch
 The source checkout, pinned vcpkg checkout, compiled libraries,
 installed resources, and build caches live under
 `${XDG_CACHE_HOME:-$HOME/.cache}/lichtfeld-studio/`. Build output is recorded in
-`build.log` there. A failed build stops without marking the installation ready.
-Subsequent launches reuse the completed installation without recompiling.
+`build.log` there. If setup fails or is interrupted with Ctrl+C in its original
+terminal, it stops the setup command group and removes that version's incomplete
+source, application build, and installation directory. It does not mark the
+installation ready. The log, shared dependency/download caches, other completed
+versions, and backups are retained. Cleanup failures are reported with the path
+that still needs removal. Subsequent launches reuse a completed installation
+without recompiling, or retry a failed setup with a fresh application checkout.
+
 The installed Python layout references that build's Python 3.12 interpreter and
 standard library. Before marking a build ready, the launcher uses the matching
 interpreter to check codecs, SSL, the native `lichtfeld` extension, and the
@@ -121,6 +132,27 @@ six jobs and PTX for GPUs with compute capability 7.5 or newer. The driver may
 take extra time to compile PTX on first use. Allow tens of gigabytes for
 dependencies and build artifacts. Updating the source triggers another cached
 build; it does not reuse an application binary from another source version.
+
+### Uninstall and clean up
+
+Setup prints uninstall instructions and the exact cache path on both success
+and failure. Removing the package from `home.packages` or
+`environment.systemPackages` and rebuilding removes its command and desktop
+entry. If installed through `nix profile add`, remove its profile entry instead.
+Remove unused flake inputs only after removing their configuration references.
+
+Nix does not automatically remove the source-build cache. After closing the
+application and stopping any setup build, you can remove it explicitly:
+
+```bash
+rm -rI -- "${XDG_CACHE_HOME:-$HOME/.cache}/lichtfeld-studio"
+```
+
+This asks for confirmation and deletes all cached application versions,
+dependencies, and archived backups. It does not remove projects or the
+`~/.lichtfeld` settings and plugins. For a custom cache location, use the safely
+quoted command printed by setup. Unreferenced Nix store paths can be reclaimed
+with `nix store gc`; older system generations may still retain them.
 
 ### Development environment
 

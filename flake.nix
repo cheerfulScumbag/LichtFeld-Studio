@@ -70,10 +70,13 @@
       # vcpkg resolves and builds dependencies during configure. Keep that
       # networked build outside the Nix sandbox and inside a versioned cache.
       runtime = pkgs.writeText "lichtfeld-studio-runtime.py" ''
+        import ctypes
         import fcntl
         import os
         from pathlib import Path
         import shutil
+        import shlex
+        import signal
         import subprocess
         import sys
 
@@ -104,6 +107,40 @@
         binary_cache.mkdir(exist_ok=True)
         os.environ["VCPKG_DEFAULT_BINARY_CACHE"] = str(binary_cache)
         jobs = min(6, os.cpu_count() or 1)
+
+        def check_nvidia_gpu():
+            try:
+                driver = ctypes.CDLL("libcuda.so.1")
+            except OSError as error:
+                raise RuntimeError("NVIDIA driver unavailable. A working NVIDIA driver 570 or newer is required.") from error
+
+            def checked(name, *args):
+                result = getattr(driver, name)(*args)
+                if result == 100:
+                    raise RuntimeError("No usable NVIDIA GPU found. Check the GPU, driver, and CUDA_VISIBLE_DEVICES.")
+                if result != 0:
+                    raise RuntimeError(f"NVIDIA driver check {name} failed with CUDA error {result}.")
+
+            checked("cuInit", 0)
+            version = ctypes.c_int()
+            checked("cuDriverGetVersion", ctypes.byref(version))
+            if version.value < 12080:
+                raise RuntimeError("The NVIDIA driver must support CUDA 12.8 or newer. Update to driver 570 or newer.")
+            count = ctypes.c_int()
+            checked("cuDeviceGetCount", ctypes.byref(count))
+            if count.value < 1:
+                raise RuntimeError("No usable NVIDIA GPU is visible to the application.")
+            device = ctypes.c_int()
+            checked("cuDeviceGet", ctypes.byref(device), 0)
+            major, minor = ctypes.c_int(), ctypes.c_int()
+            checked("cuDeviceComputeCapability", ctypes.byref(major), ctypes.byref(minor), device.value)
+            if major.value * 10 + minor.value < 75:
+                raise RuntimeError(f"The first visible NVIDIA GPU has compute capability {major.value}.{minor.value}; "
+                                   "7.5 or newer is required. Use CUDA_VISIBLE_DEVICES to select a supported GPU.")
+            name = ctypes.create_string_buffer(256)
+            checked("cuDeviceGetName", name, len(name), device.value)
+            return (f"NVIDIA GPU: {name.value.decode(errors='replace')} (SM {major.value}.{minor.value}); "
+                    f"driver supports CUDA {version.value // 1000}.{version.value % 1000 // 10}")
 
         def make_writable(root):
             for directory, dirs, files in os.walk(root):
@@ -140,27 +177,61 @@
                 notify("LichtFeld Studio", message)
                 sys.exit(0)
             if not ready.exists():
-                version.mkdir(parents=True, exist_ok=True)
-                print("Building LichtFeld Studio for first use. This can take a long time.", file=sys.stderr)
-                print(f"Build log: {cache / 'build.log'}", file=sys.stderr)
-                notify("LichtFeld Studio", f"Building application for first use. Log: {cache / 'build.log'}")
+                notify("LichtFeld Studio", f"Preparing first-use setup. Log: {cache / 'build.log'}")
                 with (cache / "build.log").open("w") as log:
-                    def emit(message):
-                        print(message, file=log, flush=True)
-                        print(message, file=sys.stderr, flush=True)
+                    def emit(message, best_effort=False):
+                        failure = None
+                        for stream in (log, sys.stderr):
+                            try:
+                                print(message, file=stream, flush=True)
+                            except OSError as error:
+                                failure = error
+                        if failure is not None and not best_effort:
+                            raise failure
 
                     def run(*args, cwd=None, env=None):
                         command = list(map(str, args))
                         emit("Running: " + " ".join(command))
                         with subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                              stderr=subprocess.STDOUT, text=True, errors="replace") as process:
-                            for line in process.stdout:
-                                emit(line.rstrip("\n"))
-                            if process.wait() != 0:
-                                raise subprocess.CalledProcessError(process.returncode, command)
+                                              stderr=subprocess.STDOUT, text=True, errors="replace",
+                                              start_new_session=True) as process:
+                            try:
+                                for line in process.stdout:
+                                    emit(line.rstrip("\n"))
+                                if process.wait() != 0:
+                                    raise subprocess.CalledProcessError(process.returncode, command)
+                            except BaseException:
+                                # Stop this command's compiler descendants before
+                                # cleaning their output. Never kill unrelated builds.
+                                try:
+                                    os.killpg(process.pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    try:
+                                        os.killpg(process.pid, signal.SIGKILL)
+                                    except ProcessLookupError:
+                                        pass
+                                    process.wait()
+                                raise
+
+                    def uninstall_instructions(best_effort=False):
+                        for line in (
+                            "\nUninstall: remove LichtFeld Studio from your NixOS/Home Manager packages and rebuild,",
+                            "or remove its Nix profile entry if it was installed through a profile.",
+                            f"Cached application builds and dependencies: {cache}",
+                            "After closing the app and stopping setup, optionally remove this cache, including its backups:",
+                            "  rm -rI -- " + shlex.quote(str(cache)),
+                            "Projects and application settings are not removed by this command.",
+                        ):
+                            emit(line, best_effort=best_effort)
 
                     terminal = None
                     try:
+                        emit("Setting up LichtFeld Studio for first use. Compilation can take a long time.")
+                        emit(f"Build log: {cache / 'build.log'}")
                         if not sys.stderr.isatty() and (desktop_env.get("DISPLAY") or desktop_env.get("WAYLAND_DISPLAY")):
                             # xdg-terminal-exec honors the user's configured terminal.
                             subprocess.run(["${pkgs.xdg-terminal-exec}/bin/xdg-terminal-exec", "--print-id"],
@@ -171,16 +242,21 @@
                                 "${pkgs.python3.interpreter}", "${setupProgress}",
                                 str(cache / "build.log"), str(cache / "build.lock"), str(ready),
                             ], env=desktop_env, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
-                        emit("\n[1/5] Preparing source")
+                        emit("\n[1/6] Checking NVIDIA GPU and driver")
+                        emit(check_nvidia_gpu())
+                        emit("\n[2/6] Preparing source")
+                        version.mkdir(parents=True, exist_ok=True)
                         if not checkout.exists():
                             shutil.copytree(source, checkout, symlinks=True)
                             make_writable(checkout)
                             shutil.copytree("${libvtermSource}", checkout / "external/libvterm",
                                             dirs_exist_ok=True)
                             make_writable(checkout / "external/libvterm")
-                        emit("\n[2/5] Resolving dependencies")
+                        emit("\n[3/6] Resolving dependencies")
                         if not vcpkg.exists():
-                            run("git", "clone", "https://github.com/microsoft/vcpkg.git", vcpkg)
+                            temporary_vcpkg = version / "vcpkg-checkout"
+                            run("git", "clone", "https://github.com/microsoft/vcpkg.git", temporary_vcpkg)
+                            temporary_vcpkg.rename(vcpkg)
                         revision = os.environ["LFS_VCPKG_REV"]
                         current = subprocess.check_output(["git", "-C", str(vcpkg), "rev-parse", "HEAD"], text=True).strip()
                         if current != revision:
@@ -194,9 +270,9 @@
                             "-DCMAKE_INSTALL_BINDIR=bin", "-DCMAKE_INSTALL_LIBDIR=lib",
                             "-DCMAKE_INSTALL_DATADIR=share",
                             "-DLFS_DOWNLOAD_CACHE_DIR=" + str(cache / "downloads"), cwd=checkout)
-                        emit("\n[3/5] Compiling LichtFeld Studio")
+                        emit("\n[4/6] Compiling LichtFeld Studio")
                         run("cmake", "--build", "--preset", "linux-release", "--parallel", jobs, cwd=checkout)
-                        emit("\n[4/5] Installing application and runtime libraries")
+                        emit("\n[5/6] Installing application and runtime libraries")
                         (payload / "lib").mkdir(parents=True, exist_ok=True)
                         # Upstream install targets omit lfs_rmlui and OpenMesh libraries.
                         # Stage all source-built shared libraries before cmake install.
@@ -229,7 +305,7 @@
                                 destination.symlink_to(os.path.relpath(target, destination.parent),
                                                        target_is_directory=target.is_dir())
                         run("cmake", "--install", build, "--prefix", payload)
-                        emit("\n[5/5] Validating Python and native bindings")
+                        emit("\n[6/6] Validating Python and native bindings")
                         check_env = os.environ.copy()
                         check_env["LD_LIBRARY_PATH"] = library_path(payload)
                         check_env["PYTHONHOME"] = str(payload)
@@ -244,17 +320,28 @@
                             payload / "lib/python", env=check_env)
                         ready.write_text("Build, install, and matching Python runtime validation completed successfully.\n")
                         emit("\nSetup complete. Starting LichtFeld Studio.")
-                        notify("LichtFeld Studio", "Build complete. Starting application.")
-                    except (OSError, subprocess.SubprocessError) as error:
-                        error_msg = f"Setup failed: {error}. See {cache / 'build.log'}"
-                        emit(error_msg)
+                        uninstall_instructions()
+                        notify("LichtFeld Studio", f"Build complete. Starting application. Cache/removal instructions: {cache / 'build.log'}")
+                    except (OSError, RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+                        reason = "Setup cancelled" if isinstance(error, KeyboardInterrupt) else f"Setup failed: {error}"
+                        error_msg = f"{reason.rstrip('.')}. See {cache / 'build.log'}"
+                        emit(error_msg, best_effort=True)
+                        if not ready.exists() and version.exists():
+                            try:
+                                make_writable(version)
+                                shutil.rmtree(version)
+                                emit(f"Removed incomplete application build: {version}", best_effort=True)
+                            except OSError as cleanup_error:
+                                emit(f"Could not remove incomplete build {version}: {cleanup_error}", best_effort=True)
+                        emit("The build log, shared dependency caches, and other application versions were retained.", best_effort=True)
+                        uninstall_instructions(best_effort=True)
                         notify("LichtFeld Studio", error_msg, urgency="critical")
                         if terminal is None and sys.stdin.isatty():
                             try:
                                 input("Press Enter to close this window.")
                             except (EOFError, KeyboardInterrupt):
                                 pass
-                        sys.exit(1)
+                        sys.exit(130 if isinstance(error, KeyboardInterrupt) else 1)
                     finally:
                         if terminal is not None:
                             terminal.poll()
@@ -269,6 +356,7 @@
       '';
       setupTests = pkgs.writeText "lichtfeld-setup-tests.py" ''
         import ast
+        import ctypes
         import fcntl
         import io
         import os
@@ -276,6 +364,8 @@
         import subprocess
         import sys
         import tempfile
+        import shlex
+        import signal
         import threading
         import time
         import unittest
@@ -287,7 +377,48 @@
                    if isinstance(node, ast.Assign) and any(
                        isinstance(target, ast.Name) and target.id == "version" for target in node.targets))
 
+        class FakeCuda:
+            driver_version, count, capability, init_error = 12080, 1, (7, 5), 0
+            def cuInit(self, flags):
+                return self.init_error
+            def cuDriverGetVersion(self, version):
+                version._obj.value = self.driver_version
+                return 0
+            def cuDeviceGetCount(self, count):
+                count._obj.value = self.count
+                return 0
+            def cuDeviceGet(self, device, ordinal):
+                device._obj.value = 0
+                return 0
+            def cuDeviceComputeCapability(self, major, minor, device):
+                major._obj.value, minor._obj.value = self.capability
+                return 0
+            def cuDeviceGetName(self, name, size, device):
+                name.value = b"Fixture GPU"
+                return 0
+
         class SetupTests(unittest.TestCase):
+            def test_gpu_requirements(self):
+                function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                                and node.name == "check_nvidia_gpu")
+                namespace = {"ctypes": ctypes}
+                exec(compile(ast.Module(body=[function], type_ignores=[]), "gpu-check", "exec"), namespace)
+                with patch("ctypes.CDLL", side_effect=OSError("missing driver")):
+                    with self.assertRaisesRegex(RuntimeError, "NVIDIA driver unavailable"):
+                        namespace["check_nvidia_gpu"]()
+                cases = [("driver_version", 12070, "CUDA 12.8"), ("count", 0, "No usable NVIDIA GPU"),
+                         ("capability", (7, 4), "7.5 or newer"), ("init_error", 100, "No usable NVIDIA GPU"),
+                         ("init_error", 803, "CUDA error 803")]
+                for attribute, value, message in cases:
+                    with self.subTest(attribute=attribute, value=value):
+                        driver = FakeCuda()
+                        setattr(driver, attribute, value)
+                        with patch("ctypes.CDLL", return_value=driver):
+                            with self.assertRaisesRegex(RuntimeError, message):
+                                namespace["check_nvidia_gpu"]()
+                with patch("ctypes.CDLL", return_value=FakeCuda()):
+                    self.assertIn("Fixture GPU (SM 7.5)", namespace["check_nvidia_gpu"]())
+
             def test_duplicate_and_cached_launch(self):
                 with tempfile.TemporaryDirectory() as directory:
                     env = os.environ.copy()
@@ -316,9 +447,9 @@
                     self.assertEqual(result.stdout.strip(), "GUI_READY --help")
                     self.assertEqual(log.read_text(), "existing build output")
 
-            def test_first_setup_stages_and_terminal_failure(self):
-                for missing_terminal in (False, True):
-                    with self.subTest(missing_terminal=missing_terminal), tempfile.TemporaryDirectory() as directory:
+            def test_first_setup_success_and_cleanup(self):
+                for scenario in ("success", "missing_terminal", "missing_gpu", "clone_failure", "compile_failure", "cancelled", "broken_console"):
+                    with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="lichtfeld's setup ") as directory:
                         cache = Path(directory) / "lichtfeld-studio"
                         version = cache / key
                         prefix = version / "source/build-linux-release/vcpkg_installed/x64-linux"
@@ -326,48 +457,99 @@
                             file = prefix / name
                             file.parent.mkdir(parents=True, exist_ok=True)
                             file.touch()
-                        def start_process(*args, **kwargs):
+                        preserved = [cache / "other-version/.ready", cache / "downloads/archive",
+                                     cache / ".backups/previous-build", Path(directory) / ".lichtfeld/settings"]
+                        for file in preserved:
+                            file.parent.mkdir(parents=True, exist_ok=True)
+                            file.write_text("keep")
+                        def interrupted_output():
+                            yield "fixture compiler active\n"
+                            raise KeyboardInterrupt
+                        def start_process(command, **kwargs):
                             process = MagicMock()
+                            process.pid = 876543
                             process.__enter__.return_value = process
                             process.stdout = io.StringIO("[1/1] fixture build output\n")
-                            process.wait.return_value = process.returncode = 0
+                            if command[:2] == ["git", "clone"]:
+                                Path(command[-1]).mkdir(parents=True)
+                            failed = ((scenario == "compile_failure" and "--build" in command)
+                                      or (scenario == "clone_failure" and command[:2] == ["git", "clone"]))
+                            process.wait.return_value = process.returncode = 7 if failed else 0
+                            if scenario == "cancelled" and "--build" in command:
+                                process.stdout = interrupted_output()
                             return process
                         def run_command(command, **kwargs):
-                            if missing_terminal and "--print-id" in command:
+                            if scenario == "missing_terminal" and "--print-id" in command:
                                 raise subprocess.CalledProcessError(2, command)
                             return subprocess.CompletedProcess(command, 0)
+                        def load_driver(name):
+                            if scenario == "missing_gpu":
+                                raise OSError("driver unavailable")
+                            return FakeCuda()
+                        console = io.StringIO()
+                        if scenario == "broken_console":
+                            console = MagicMock()
+                            console.write.side_effect = BrokenPipeError("closed console")
+                            console.isatty.return_value = False
                         with patch.dict(os.environ, {
                             "HOME": directory, "XDG_CACHE_HOME": directory, "DISPLAY": ":fixture",
                             "LFS_VCPKG_REV": "pinned", "LD_LIBRARY_PATH": "fhs-library-path",
-                        }), patch("sys.stderr", io.StringIO()), patch("sys.stdin.isatty", return_value=False), \
+                        }), patch("sys.stderr", console), patch("sys.stdin.isatty", return_value=False), \
                              patch("subprocess.run", side_effect=run_command), \
                              patch("subprocess.check_output", return_value="pinned\n"), \
                              patch("subprocess.Popen", side_effect=start_process) as popen, \
+                             patch("ctypes.CDLL", side_effect=load_driver), patch("os.killpg") as stop_group, \
                              patch("os.execv") as launch:
-                            if missing_terminal:
+                            if scenario != "success":
                                 with self.assertRaises(SystemExit) as failure:
                                     exec(compile(tree, str(runtime), "exec"), {"__name__": "__main__"})
-                                self.assertEqual(failure.exception.code, 1)
+                                self.assertEqual(failure.exception.code, 130 if scenario == "cancelled" else 1)
                                 launch.assert_not_called()
-                                self.assertFalse((version / ".ready").exists())
+                                self.assertFalse(version.exists(), "only the incomplete version should be removed")
+                                if scenario == "missing_gpu":
+                                    self.assertEqual(len(popen.call_args_list), 1, "GPU failure must precede dependency builds")
+                                if scenario in ("clone_failure", "compile_failure", "cancelled"):
+                                    stop_group.assert_called_once_with(876543, signal.SIGTERM)
+                                if scenario == "clone_failure":
+                                    self.assertFalse((cache / "vcpkg").exists(), "a failed clone must not become the shared checkout")
                             else:
                                 exec(compile(tree, str(runtime), "exec"), {"__name__": "__main__"})
                                 launch.assert_called_once()
+                                stop_group.assert_not_called()
                                 self.assertTrue((version / ".ready").is_file())
                                 terminal_call = popen.call_args_list[0]
                                 self.assertIn("--title=LichtFeld Studio setup", terminal_call.args[0])
                                 self.assertNotIn("LD_LIBRARY_PATH", terminal_call.kwargs["env"])
                                 self.assertEqual(terminal_call.kwargs["env"]["XDG_CACHE_HOME"], directory)
-                                log = (cache / "build.log").read_text()
-                                for stage in range(1, 6):
-                                    self.assertIn(f"[{stage}/5]", log)
+                            log = (cache / "build.log").read_text()
+                            if scenario == "success":
+                                for stage in range(1, 7):
+                                    self.assertIn(f"[{stage}/6]", log)
                                 self.assertIn("Setup complete", log)
+                            self.assertIn("Uninstall:", log)
+                            removal = next(line.strip() for line in log.splitlines() if line.strip().startswith("rm -rI -- "))
+                            self.assertEqual(shlex.split(removal), ["rm", "-rI", "--", str(cache)])
+                            for file in preserved:
+                                self.assertEqual(file.read_text(), "keep")
+
+            def test_log_failure_does_not_block_cleanup_reporting(self):
+                function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "emit")
+                log = MagicMock()
+                log.write.side_effect = OSError("No space left on device")
+                console = io.StringIO()
+                namespace = {"sys": sys, "log": log}
+                exec(compile(ast.Module(body=[function], type_ignores=[]), "emit", "exec"), namespace)
+                with patch("sys.stderr", console):
+                    with self.assertRaises(OSError):
+                        namespace["emit"]("startup")
+                    namespace["emit"]("cleanup still runs", best_effort=True)
+                self.assertIn("cleanup still runs", console.getvalue())
 
             def test_live_output_and_command_failure(self):
                 functions = [node for node in ast.walk(tree)
                              if isinstance(node, ast.FunctionDef) and node.name in ("emit", "run")]
                 log, terminal = io.StringIO(), io.StringIO()
-                namespace = {"subprocess": subprocess, "sys": sys, "log": log}
+                namespace = {"subprocess": subprocess, "sys": sys, "log": log, "os": os, "signal": signal}
                 exec(compile(ast.Module(body=functions, type_ignores=[]), "runtime-functions", "exec"), namespace)
                 with tempfile.TemporaryDirectory() as directory, patch("sys.stderr", terminal):
                     gate = Path(directory) / "continue"
