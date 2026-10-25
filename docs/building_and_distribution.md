@@ -92,7 +92,21 @@ and add its `packages.x86_64-linux.default` to `environment.systemPackages` or
 desktop launcher in your user session.
 
 The first invocation, including `--help`, needs network access and can take
-a long time. The source checkout, pinned vcpkg checkout, compiled libraries,
+a long time. When launched from the application menu, setup opens the user's
+default terminal through `xdg-terminal-exec`. It shows the build log live,
+including dependency and compiler progress counts, and labels each setup stage.
+When launched from a terminal, the output appears in that terminal instead.
+Additional clicks during setup report that setup is already running and exit;
+they do not restart compilation or queue extra application windows.
+
+The progress window closes automatically when setup succeeds and the GUI starts.
+If setup fails, it stays open with the log location until Enter is pressed.
+Closing the progress window while compilation is running does not cancel setup;
+the GUI still starts when setup finishes. Subsequent launches open the GUI
+directly, without a terminal. If no default terminal is available, launch
+`lichtfeld-studio` from an existing terminal.
+
+The source checkout, pinned vcpkg checkout, compiled libraries,
 installed resources, and build caches live under
 `${XDG_CACHE_HOME:-$HOME/.cache}/lichtfeld-studio/`. Build output is recorded in
 `build.log` there. A failed build stops without marking the installation ready.
