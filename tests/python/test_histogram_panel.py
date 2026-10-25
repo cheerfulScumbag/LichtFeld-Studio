@@ -1648,7 +1648,9 @@ def test_bin_scrub_drag_cancel_and_typed_value(histogram_panel_module, prop, min
     input_el = MagicMock()
     input_el.get_attribute.side_effect = lambda name, default="": attrs.get(name, default)
     input_el.set_attribute.side_effect = attrs.__setitem__
-    state = _ScrubFieldState(prop, controller._specs[prop], MagicMock(absolute_width=100.0),
+    field = MagicMock(absolute_width=100.0)
+    field.get_attribute.side_effect = lambda name, default="": default
+    state = _ScrubFieldState(prop, controller._specs[prop], field,
                              MagicMock(), MagicMock(), input_el)
     controller._fields[prop] = state
     initial = panel._get_bin_scrub_value(prop)
